@@ -1,0 +1,1123 @@
+package com.gitbackup.ui;
+
+import com.gitbackup.backup.BackupLog;
+import com.gitbackup.backup.BackupService;
+import com.gitbackup.backup.PasswordRequiredException;
+import com.gitbackup.backup.RestoreService;
+import com.gitbackup.backup.RestoreService.BackupVersion;
+import com.gitbackup.backup.Schedule;
+import com.gitbackup.store.AutoStart;
+import com.gitbackup.store.SingleInstance;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
+import javafx.scene.image.Image;
+import com.gitbackup.github.GitHubException;
+import com.gitbackup.github.TokenStore;
+import com.gitbackup.model.AppConfig;
+import com.gitbackup.store.AppPaths;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.text.MessageFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.ResourceBundle;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import javafx.animation.PauseTransition;
+import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.beans.Observable;
+import javafx.beans.property.ReadOnlyObjectWrapper;
+import javafx.collections.FXCollections;
+import javafx.collections.ListChangeListener;
+import javafx.collections.ObservableList;
+import javafx.collections.transformation.FilteredList;
+import javafx.collections.transformation.SortedList;
+import javafx.geometry.Insets;
+import javafx.geometry.NodeOrientation;
+import javafx.geometry.Pos;
+import javafx.scene.Parent;
+import javafx.scene.Scene;
+import javafx.scene.control.Alert;
+import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
+import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Dialog;
+import javafx.scene.control.Label;
+import javafx.scene.control.PasswordField;
+import javafx.scene.control.ProgressBar;
+import javafx.scene.control.RadioButton;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.TableCell;
+import javafx.scene.control.TableColumn;
+import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleGroup;
+import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.image.PixelReader;
+import javafx.scene.image.WritableImage;
+import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
+import javafx.stage.DirectoryChooser;
+import javafx.stage.Stage;
+import javafx.util.Duration;
+import javafx.util.StringConverter;
+import javax.imageio.ImageIO;
+
+/** The application window: pick repositories, pick a folder, run the backup. */
+public class MainApp extends Application {
+    private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("yyyy-MM-dd  HH:mm", Locale.ROOT);
+    private static final int MIN_PASSWORD_LENGTH = 8;
+    /** Gives Google Drive and the network time to come up after Windows starts. */
+    private static final long STARTUP_DELAY_MS = 90_000;
+    private static final long RETRY_DELAY_MS = 10 * 60_000;
+    private static final String[] LANGUAGES = {"ar", "en"};
+    private static final String[] LANGUAGE_NAMES = {"العربية", "English"};
+
+    private final AppPaths paths = AppPaths.defaults();
+    private final BackupService service = new BackupService(paths);
+    private final RestoreService restoreService = new RestoreService(paths);
+    private final ExecutorService worker = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "backup-worker");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /** Fires a list change when a row is ticked, so the counter follows. */
+    private final ObservableList<RepoRow> rows =
+            FXCollections.observableArrayList(row -> new Observable[] {row.selectedProperty()});
+    private final FilteredList<RepoRow> visibleRows = new FilteredList<>(rows);
+    private final AtomicBoolean stopRequested = new AtomicBoolean();
+
+    private Stage stage;
+    private AppConfig config;
+    private ResourceBundle text;
+    private boolean busy;
+    private boolean backupRunning;
+    private boolean listLoaded;
+    private boolean multipleOwners;
+    private String accountText = "";
+    private String statusText = "";
+    private String statusAfterList;
+    private boolean devAutoRunDone;
+    private SingleInstance instance;
+    private TrayIconSupport tray;
+    private boolean trayHintShown;
+    private final long startedAt = System.currentTimeMillis();
+    private long autoRetryAfter;
+
+    // Controls are rebuilt when the language changes.
+    private TextField destinationField;
+    private Spinner<Integer> keepSpinner;
+    private Label accountLabel;
+    private Label countLabel;
+    private Label statusLabel;
+    private TextField searchField;
+    private TableView<RepoRow> repoTable;
+    private CheckBox encryptBox;
+    private CheckBox scheduleBox;
+    private ComboBox<String> hourBox;
+    private ComboBox<String> minuteBox;
+    private CheckBox autoStartBox;
+    private CheckBox forceBox;
+    private ProgressBar progressBar;
+    private TextArea logArea;
+    private ComboBox<String> languageBox;
+    private final List<Region> lockedWhileBusy = new ArrayList<>();
+    private Button runButton;
+    private Button saveButton;
+    private Button stopButton;
+
+    @Override
+    public void start(Stage primaryStage) {
+        stage = primaryStage;
+        try {
+            config = service.loadConfig();
+        } catch (IOException e) {
+            config = new AppConfig();
+        }
+        text = bundleFor(config.language);
+        accountText = t("label.account.none");
+        statusText = t("state.loading");
+
+        // One window per user: a second start only brings the first one back.
+        try {
+            instance = SingleInstance.acquire(paths, () -> Platform.runLater(this::showWindow));
+            if (instance == null) {
+                Platform.exit();
+                return;
+            }
+        } catch (IOException e) {
+            instance = null; // cannot guard; opening a window is still better than not starting
+        }
+
+        Scene scene = new Scene(buildRoot(), 1080, 760);
+        scene.getStylesheets().add(MainApp.class.getResource("/app.css").toExternalForm());
+        stage.setScene(scene);
+        applyLanguage(scene);
+        for (String size : List.of("16", "32", "48", "256")) {
+            stage.getIcons().add(new Image(MainApp.class.getResource("/icon-" + size + ".png").toExternalForm()));
+        }
+        stage.setMinWidth(920);
+        stage.setMinHeight(600);
+
+        boolean devRun = System.getProperty("gitbackup.screenshot") != null;
+        if (TrayIconSupport.supported() && !devRun) {
+            tray = new TrayIconSupport(this::showWindow, this::backupFromTray, this::exitApplication);
+            tray.show(trayLabels());
+            Platform.setImplicitExit(false); // closing the window keeps the tray icon alive
+        }
+        stage.setOnCloseRequest(event -> {
+            event.consume();
+            if (tray != null && tray.active()) {
+                stage.hide();
+                if (!trayHintShown) {
+                    trayHintShown = true;
+                    tray.notify(t("app.title"), t("tray.hint"), false);
+                }
+            } else {
+                exitApplication();
+            }
+        });
+        rows.addListener((ListChangeListener<RepoRow>) change -> updateCount());
+
+        boolean startHidden = tray != null && getParameters().getRaw().contains("--tray");
+        if (startHidden) {
+            // If the tray icon could not be created there would be no way to reach the program.
+            PauseTransition check = new PauseTransition(Duration.seconds(4));
+            check.setOnFinished(event -> {
+                if (!tray.active()) {
+                    showWindow();
+                }
+            });
+            check.play();
+        } else {
+            stage.show();
+            scene.getRoot().requestFocus(); // otherwise the folder field starts selected
+        }
+
+        Timeline clock = new Timeline(new KeyFrame(Duration.seconds(30), event -> checkSchedule()));
+        clock.setCycleCount(Timeline.INDEFINITE);
+        clock.play();
+        reloadList();
+    }
+
+    @Override
+    public void stop() {
+        worker.shutdownNow();
+        if (tray != null) {
+            tray.remove();
+        }
+        if (instance != null) {
+            instance.close();
+        }
+        // The AWT thread behind the tray icon would otherwise keep the process alive.
+        System.exit(0);
+    }
+
+    private void showWindow() {
+        if (!stage.isShowing()) {
+            stage.show();
+        }
+        stage.setIconified(false);
+        stage.toFront();
+        stage.requestFocus();
+    }
+
+    private void exitApplication() {
+        if (backupRunning) {
+            showWindow();
+            if (!confirm(t("msg.closeRunning"))) {
+                return;
+            }
+        }
+        Platform.exit();
+    }
+
+    private TrayIconSupport.Labels trayLabels() {
+        return new TrayIconSupport.Labels(t("app.title"), t("tray.open"), t("tray.backup"), t("tray.exit"));
+    }
+
+    private void backupFromTray() {
+        if (busy || config.destination.isBlank()) {
+            showWindow();
+            return;
+        }
+        startBackup(false, false);
+    }
+
+    // -------------------------------------------------------------- schedule
+
+    /** Called every 30 seconds: starts today's automatic backup when its time has come. */
+    private void checkSchedule() {
+        long now = System.currentTimeMillis();
+        if (busy || config.destination.isBlank() || now - startedAt < STARTUP_DELAY_MS || now < autoRetryAfter) {
+            return;
+        }
+        if (Schedule.isDue(config.scheduleEnabled, config.scheduleTime, config.lastAutoRun, LocalDateTime.now())) {
+            startBackup(true, false);
+        }
+    }
+
+    private void afterScheduledRun(BackupService.Summary summary, String startedOn) {
+        if (summary.started()) {
+            config.lastAutoRun = startedOn;
+            saveConfig();
+        } else {
+            // For example Google Drive was not running yet: try again later, not every 30 seconds.
+            autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
+        }
+        if (summary.exitCode() != 0 && tray != null) {
+            tray.notify(t("app.title"), t(summary.started() ? "tray.failedSome" : "tray.failedStart"), true);
+        }
+    }
+
+    private void saveSchedule() {
+        config.scheduleEnabled = scheduleBox.isSelected();
+        config.scheduleTime = hourBox.getValue() + ":" + minuteBox.getValue();
+        if (saveConfig()) {
+            setStatus(config.scheduleEnabled
+                    ? MessageFormat.format(t("state.scheduleOn"), ltr(config.scheduleTime))
+                    : t("state.scheduleOff"));
+        }
+    }
+
+    private void toggleAutoStart() {
+        try {
+            AutoStart.setEnabled(autoStartBox.isSelected());
+        } catch (RuntimeException e) {
+            appendLog("Could not change start with Windows: " + e.getMessage());
+            autoStartBox.setSelected(AutoStart.isEnabled());
+        }
+    }
+
+    private HBox buildScheduleRow() {
+        scheduleBox = new CheckBox(t("check.schedule"));
+        scheduleBox.setSelected(config.scheduleEnabled);
+        LocalTime time = Schedule.parseTime(config.scheduleTime);
+        if (time == null) {
+            time = LocalTime.of(21, 0);
+        }
+        hourBox = new ComboBox<>();
+        for (int hour = 0; hour < 24; hour++) {
+            hourBox.getItems().add(String.format(Locale.ROOT, "%02d", hour));
+        }
+        minuteBox = new ComboBox<>();
+        for (int minute = 0; minute < 60; minute += 5) {
+            minuteBox.getItems().add(String.format(Locale.ROOT, "%02d", minute));
+        }
+        String minute = String.format(Locale.ROOT, "%02d", time.getMinute());
+        if (!minuteBox.getItems().contains(minute)) {
+            minuteBox.getItems().add(minute);
+        }
+        hourBox.setValue(String.format(Locale.ROOT, "%02d", time.getHour()));
+        minuteBox.setValue(minute);
+        HBox timeBox = new HBox(4, hourBox, new Label(":"), minuteBox);
+        timeBox.setAlignment(Pos.CENTER_LEFT);
+        timeBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        scheduleBox.setOnAction(event -> saveSchedule());
+        hourBox.setOnAction(event -> saveSchedule());
+        minuteBox.setOnAction(event -> saveSchedule());
+
+        autoStartBox = new CheckBox(t("check.autostart"));
+        autoStartBox.setSelected(AutoStart.isEnabled());
+        if (AutoStart.available()) {
+            autoStartBox.setOnAction(event -> toggleAutoStart());
+        } else {
+            autoStartBox.setDisable(true);
+        }
+        Label hint = new Label(t(AutoStart.available() ? "label.scheduleHint" : "label.scheduleHintDev"));
+        hint.getStyleClass().add("muted");
+        return row(scheduleBox, timeBox, gap(14), autoStartBox, gap(6), hint);
+    }
+
+    // ---------------------------------------------------------------- layout
+
+    private Parent buildRoot() {
+        lockedWhileBusy.clear();
+
+        Label destinationLabel = new Label(t("label.destination"));
+        destinationField = new TextField(config.destination);
+        destinationField.setEditable(false);
+        destinationField.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        HBox.setHgrow(destinationField, Priority.ALWAYS);
+        Button browseButton = lock(new Button(t("button.browse")));
+        browseButton.setOnAction(event -> chooseDestination());
+        Label keepLabel = new Label(t("label.keep"));
+        keepSpinner = lock(new Spinner<Integer>(1, 50, Math.min(50, Math.max(1, config.keepVersions))));
+        keepSpinner.setPrefWidth(76);
+        HBox destinationRow = row(destinationLabel, destinationField, browseButton, gap(10), keepLabel, keepSpinner);
+
+        accountLabel = new Label(accountText);
+        accountLabel.getStyleClass().add("muted");
+        Button signInButton = lock(new Button(t("button.signIn")));
+        signInButton.setOnAction(event -> showSignIn());
+        languageBox = lock(new ComboBox<String>(FXCollections.observableArrayList(LANGUAGE_NAMES)));
+        languageBox.getSelectionModel().select("en".equals(config.language) ? 1 : 0);
+        languageBox.setOnAction(event -> changeLanguage(LANGUAGES[languageBox.getSelectionModel().getSelectedIndex()]));
+        encryptBox = lock(new CheckBox(t("check.encrypt")));
+        encryptBox.setSelected(config.encrypt);
+        encryptBox.setOnAction(event -> toggleEncryption());
+        Button passwordButton = lock(new Button(t("button.password")));
+        passwordButton.setOnAction(event -> showPasswordDialog());
+        HBox accountRow = row(accountLabel, signInButton, gap(14), encryptBox, passwordButton, spacer(), languageBox);
+        HBox scheduleRow = buildScheduleRow();
+
+        Button allButton = lock(new Button(t("button.selectAll")));
+        allButton.setOnAction(event -> tickVisible(row -> true));
+        Button noneButton = lock(new Button(t("button.selectNone")));
+        noneButton.setOnAction(event -> tickVisible(row -> false));
+        Button neededButton = lock(new Button(t("button.selectNeeded")));
+        neededButton.setOnAction(event -> tickVisible(row -> row.status() != BackupService.Status.CURRENT));
+        Button refreshButton = lock(new Button(t("button.refresh")));
+        refreshButton.setOnAction(event -> reloadList());
+        searchField = new TextField();
+        searchField.setPromptText(t("prompt.search"));
+        searchField.setPrefWidth(230);
+        searchField.textProperty().addListener((observable, before, after) -> applySearch(after));
+        countLabel = new Label();
+        countLabel.getStyleClass().add("count");
+        HBox pickRow = row(allButton, noneButton, neededButton, refreshButton, searchField, spacer(), countLabel);
+
+        repoTable = buildTable();
+        TableView<RepoRow> table = repoTable;
+        VBox.setVgrow(table, Priority.ALWAYS);
+
+        runButton = lock(new Button(t("button.run")));
+        runButton.getStyleClass().add("primary");
+        runButton.setOnAction(event -> runBackup());
+        saveButton = lock(new Button(t("button.save")));
+        saveButton.setOnAction(event -> {
+            if (saveSelection()) {
+                setStatus(t("state.saved"));
+            }
+        });
+        stopButton = new Button(t("button.cancel"));
+        stopButton.setDisable(true);
+        stopButton.setOnAction(event -> {
+            stopRequested.set(true);
+            stopButton.setDisable(true);
+            setStatus(t("state.stopping"));
+        });
+        Button restoreButton = lock(new Button(t("button.restore")));
+        restoreButton.setOnAction(event -> showRestore());
+        forceBox = lock(new CheckBox(t("check.force")));
+        progressBar = new ProgressBar(0);
+        progressBar.setPrefWidth(150);
+        progressBar.setVisible(false);
+        statusLabel = new Label(statusText);
+        statusLabel.getStyleClass().add("muted");
+        HBox runRow = row(runButton, saveButton, stopButton, restoreButton, gap(6), forceBox, gap(6),
+                progressBar, statusLabel);
+
+        String previousLog = logArea == null ? "" : logArea.getText();
+        logArea = new TextArea(previousLog);
+        logArea.setEditable(false);
+        logArea.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        logArea.getStyleClass().add("log");
+        logArea.setPrefRowCount(9);
+        logArea.setMinHeight(120);
+
+        VBox root = new VBox(8, destinationRow, accountRow, scheduleRow, pickRow, table, runRow, logArea);
+        root.setPadding(new Insets(12));
+        updateCount();
+        applyBusyState();
+        return root;
+    }
+
+    private TableView<RepoRow> buildTable() {
+        TableView<RepoRow> table = new TableView<>();
+        table.setEditable(true);
+
+        TableColumn<RepoRow, Boolean> pick = new TableColumn<>();
+        pick.setCellValueFactory(cell -> cell.getValue().selectedProperty());
+        pick.setCellFactory(CheckBoxTableCell.forTableColumn(pick));
+        pick.setEditable(true);
+        pick.setSortable(false);
+        pick.setPrefWidth(42);
+
+        TableColumn<RepoRow, String> name = column("column.repo", 300,
+                row -> multipleOwners ? row.repo().fullName() : row.repo().name(), value -> value, null);
+        TableColumn<RepoRow, String> type = column("column.type", 80,
+                row -> t(row.repo().isPrivate() ? "type.private" : "type.public"), value -> value, null);
+        TableColumn<RepoRow, Long> size = column("column.size", 95,
+                row -> row.repo().sizeKb(), MainApp::formatSize, null);
+        TableColumn<RepoRow, Instant> pushed = column("column.pushed", 175,
+                row -> row.repo().pushedAt(),
+                value -> ltr(WHEN.format(value.atZone(ZoneId.systemDefault()))), null);
+        TableColumn<RepoRow, String> lastBackup = column("column.backup", 175,
+                RepoRow::lastBackup, MainApp::formatLocalTime, null);
+        TableColumn<RepoRow, BackupService.Status> status = column("column.status", 160,
+                RepoRow::status, value -> t("status." + value.name()),
+                value -> switch (value) {
+                    case CURRENT -> "status-current";
+                    case MISSING -> "status-missing";
+                    default -> "status-pending";
+                });
+
+        table.getColumns().add(pick);
+        table.getColumns().add(name);
+        table.getColumns().add(type);
+        table.getColumns().add(size);
+        table.getColumns().add(pushed);
+        table.getColumns().add(lastBackup);
+        table.getColumns().add(status);
+
+        SortedList<RepoRow> sorted = new SortedList<>(visibleRows);
+        sorted.comparatorProperty().bind(table.comparatorProperty());
+        table.setItems(sorted);
+        return table;
+    }
+
+    /** A read-only column whose cells show {@code format(value)} and may carry a style class. */
+    private <T> TableColumn<RepoRow, T> column(String titleKey, double width, Function<RepoRow, T> value,
+                                               Function<T, String> format, Function<T, String> styleClass) {
+        TableColumn<RepoRow, T> column = new TableColumn<>(t(titleKey));
+        column.setPrefWidth(width);
+        column.setEditable(false);
+        column.setCellValueFactory(cell -> new ReadOnlyObjectWrapper<>(value.apply(cell.getValue())));
+        column.setCellFactory(ignored -> new TableCell<>() {
+            @Override
+            protected void updateItem(T item, boolean empty) {
+                super.updateItem(item, empty);
+                getStyleClass().removeAll("status-current", "status-pending", "status-missing");
+                if (empty || item == null) {
+                    setText(null);
+                    return;
+                }
+                setText(format.apply(item));
+                if (styleClass != null) {
+                    getStyleClass().add(styleClass.apply(item));
+                }
+            }
+        });
+        return column;
+    }
+
+    private HBox row(javafx.scene.Node... children) {
+        HBox box = new HBox(8, children);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    private static Region spacer() {
+        Region region = new Region();
+        HBox.setHgrow(region, Priority.ALWAYS);
+        return region;
+    }
+
+    private static Region gap(double width) {
+        Region region = new Region();
+        region.setMinWidth(width);
+        return region;
+    }
+
+    private <N extends Region> N lock(N control) {
+        lockedWhileBusy.add(control);
+        return control;
+    }
+
+    // ------------------------------------------------------------ list / state
+
+    private void reloadList() {
+        if (busy) {
+            return;
+        }
+        setBusy(true, false, t("state.loading"));
+        worker.submit(() -> {
+            try {
+                BackupService.Listing listing = service.list();
+                Platform.runLater(() -> showListing(listing));
+            } catch (Exception e) {
+                Platform.runLater(() -> showListFailure(e));
+            }
+        });
+    }
+
+    private void showListing(BackupService.Listing listing) {
+        // Keep ticks the user changed but has not saved yet.
+        Map<String, Boolean> previous = new HashMap<>();
+        for (RepoRow row : rows) {
+            previous.put(row.repo().fullName(), row.isSelected());
+        }
+        List<RepoRow> fresh = new ArrayList<>();
+        java.util.Set<String> owners = new java.util.HashSet<>();
+        for (BackupService.RepoStatus status : listing.repos()) {
+            RepoRow row = new RepoRow(status);
+            Boolean ticked = previous.get(row.repo().fullName());
+            if (ticked != null) {
+                row.setSelected(ticked);
+            }
+            owners.add(row.repo().owner());
+            fresh.add(row);
+        }
+        multipleOwners = owners.size() > 1;
+        rows.setAll(fresh);
+        listLoaded = true;
+
+        accountText = MessageFormat.format(
+                t(listing.tokenSource() == TokenStore.Source.SAVED_TOKEN ? "label.account.saved" : "label.account.cli"),
+                listing.login());
+        accountLabel.setText(accountText);
+
+        String state = t("state.ready");
+        if (config.destination.isBlank()) {
+            state = t("state.noDestination");
+        } else if (!listing.destinationFound()) {
+            state = t("state.destinationMissing");
+        } else if (statusAfterList != null) {
+            state = statusAfterList;
+        }
+        statusAfterList = null;
+        setBusy(false, false, state);
+        devHook();
+    }
+
+    private void showListFailure(Exception error) {
+        boolean signIn = error instanceof GitHubException github
+                && (github.kind() == GitHubException.Kind.NOT_SIGNED_IN
+                || github.kind() == GitHubException.Kind.UNAUTHORIZED);
+        appendLog(String.valueOf(error.getMessage()));
+        if (signIn) {
+            accountText = t("label.account.none");
+            accountLabel.setText(accountText);
+        }
+        statusAfterList = null;
+        setBusy(false, false, t(signIn ? "state.signInNeeded" : "state.listFailed"));
+        devHook();
+    }
+
+    private void applySearch(String query) {
+        String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        visibleRows.setPredicate(needle.isEmpty()
+                ? null
+                : row -> row.repo().fullName().toLowerCase(Locale.ROOT).contains(needle));
+    }
+
+    /** Ticks or clears the rows currently shown (the search may hide some). */
+    private void tickVisible(Predicate<RepoRow> decide) {
+        for (RepoRow row : new ArrayList<>(visibleRows)) {
+            row.setSelected(decide.test(row));
+        }
+    }
+
+    private void updateCount() {
+        if (countLabel == null) {
+            return;
+        }
+        long selected = rows.stream().filter(RepoRow::isSelected).count();
+        countLabel.setText(MessageFormat.format(t("label.count"), selected, rows.size()));
+    }
+
+    private void setStatus(String value) {
+        statusText = value;
+        statusLabel.setText(value);
+    }
+
+    private void setBusy(boolean nowBusy, boolean backup, String status) {
+        busy = nowBusy;
+        backupRunning = nowBusy && backup;
+        setStatus(status);
+        applyBusyState();
+    }
+
+    private void applyBusyState() {
+        for (Region control : lockedWhileBusy) {
+            control.setDisable(busy);
+        }
+        if (!busy && !listLoaded) {
+            runButton.setDisable(true);
+            saveButton.setDisable(true);
+        }
+        stopButton.setDisable(!backupRunning || stopRequested.get());
+        progressBar.setVisible(backupRunning);
+    }
+
+    // --------------------------------------------------------------- actions
+
+    private void chooseDestination() {
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle(t("chooser.title"));
+        if (!config.destination.isBlank()) {
+            File current = new File(config.destination);
+            if (current.isDirectory()) {
+                chooser.setInitialDirectory(current);
+            }
+        }
+        File chosen = chooser.showDialog(stage);
+        if (chosen == null) {
+            return;
+        }
+        config.destination = chosen.getAbsolutePath();
+        destinationField.setText(config.destination);
+        if (saveConfig()) {
+            reloadList();
+        }
+    }
+
+    /** Stores the ticked repositories, the folder and the number of versions. */
+    private boolean saveSelection() {
+        if (config.destination.isBlank()) {
+            warn(t("msg.pickDestination"));
+            return false;
+        }
+        List<String> selected = rows.stream().filter(RepoRow::isSelected).map(row -> row.repo().fullName()).toList();
+        if (selected.isEmpty()) {
+            warn(t("msg.needOne"));
+            return false;
+        }
+        // Everything ticked is stored as an empty list, which means "all repositories",
+        // so repositories created later are covered too.
+        config.include = selected.size() == rows.size() ? new ArrayList<>() : new ArrayList<>(selected);
+        config.keepVersions = keepSpinner.getValue();
+        return saveConfig();
+    }
+
+    private boolean saveConfig() {
+        try {
+            service.saveConfig(config);
+            return true;
+        } catch (IOException e) {
+            appendLog("Could not save the settings: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private void runBackup() {
+        if (busy || !saveSelection()) {
+            return;
+        }
+        startBackup(false, forceBox.isSelected());
+    }
+
+    /**
+     * Backs up the saved selection in the background. A scheduled run never saves what is
+     * ticked in the window: only what the user saved counts.
+     */
+    private void startBackup(boolean scheduled, boolean force) {
+        String startedOn = LocalDate.now().toString();
+        stopRequested.set(false);
+        progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+        setBusy(true, true, t("state.running"));
+        BackupLog log = new BackupLog() {
+            @Override
+            public void log(Level level, String line) {
+                Platform.runLater(() -> appendLog(line));
+            }
+
+            @Override
+            public void progress(int done, int total) {
+                Platform.runLater(() -> progressBar.setProgress(total == 0 ? 1 : (double) done / total));
+            }
+        };
+        worker.submit(() -> {
+            BackupService.Summary summary = service.run(force, log, stopRequested::get);
+            Platform.runLater(() -> {
+                if (scheduled) {
+                    afterScheduledRun(summary, startedOn);
+                }
+                statusAfterList = t(switch (summary.exitCode()) {
+                    case 0 -> "state.done";
+                    case 1 -> "state.doneErrors";
+                    default -> "state.failed";
+                });
+                setBusy(false, false, statusAfterList);
+                reloadList();
+            });
+        });
+    }
+
+    /**
+     * Lets the user pick a backed-up repository (including ones no longer on GitHub), one of
+     * its versions and a folder, then restores it into a new sub-folder there.
+     */
+    private void showRestore() {
+        if (busy) {
+            return;
+        }
+        if (config.destination.isBlank()) {
+            warn(t("msg.pickDestination"));
+            return;
+        }
+        Map<String, List<BackupVersion>> backups;
+        try {
+            backups = restoreService.findBackups(Path.of(config.destination));
+        } catch (IOException | RuntimeException e) {
+            appendLog("Could not read the backup folder: " + e.getMessage());
+            setStatus(t("state.restoreFailed"));
+            return;
+        }
+        if (backups.isEmpty()) {
+            warn(t("restore.none"));
+            return;
+        }
+
+        ComboBox<String> repoBox = new ComboBox<>(FXCollections.observableArrayList(backups.keySet()));
+        repoBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        repoBox.setMaxWidth(Double.MAX_VALUE);
+        ComboBox<BackupVersion> versionBox = new ComboBox<>();
+        versionBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        versionBox.setMaxWidth(Double.MAX_VALUE);
+        versionBox.setConverter(new StringConverter<>() {
+            @Override
+            public String toString(BackupVersion version) {
+                return version == null ? "" : describe(version);
+            }
+
+            @Override
+            public BackupVersion fromString(String value) {
+                return null;
+            }
+        });
+        repoBox.setOnAction(event -> {
+            versionBox.getItems().setAll(backups.get(repoBox.getValue()));
+            versionBox.getSelectionModel().selectFirst();
+        });
+        RepoRow highlighted = repoTable.getSelectionModel().getSelectedItem();
+        String initial = highlighted != null && backups.containsKey(highlighted.repo().fullName())
+                ? highlighted.repo().fullName()
+                : backups.keySet().iterator().next();
+        repoBox.setValue(initial);
+        versionBox.getItems().setAll(backups.get(initial));
+        versionBox.getSelectionModel().selectFirst();
+
+        ToggleGroup mode = new ToggleGroup();
+        RadioButton fullMode = new RadioButton(t("restore.modeFull"));
+        fullMode.setToggleGroup(mode);
+        fullMode.setSelected(true);
+        RadioButton filesMode = new RadioButton(t("restore.modeFiles"));
+        filesMode.setToggleGroup(mode);
+
+        TextField folderField = new TextField();
+        folderField.setEditable(false);
+        folderField.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        folderField.setPrefWidth(380);
+        Button folderButton = new Button(t("button.browse"));
+        folderButton.setOnAction(event -> {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle(t("restore.chooser"));
+            File chosen = chooser.showDialog(stage);
+            if (chosen != null) {
+                folderField.setText(chosen.getAbsolutePath());
+            }
+        });
+        Label note = new Label(t("restore.note"));
+        note.getStyleClass().add("muted");
+        note.setWrapText(true);
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(14));
+        grid.addRow(0, new Label(t("restore.repo")), repoBox);
+        grid.addRow(1, new Label(t("restore.version")), versionBox);
+        grid.add(fullMode, 1, 2);
+        grid.add(filesMode, 1, 3);
+        grid.addRow(4, new Label(t("restore.folder")), folderField, folderButton);
+        grid.add(note, 1, 5, 2, 1);
+        GridPane.setHgrow(repoBox, Priority.ALWAYS);
+        GridPane.setColumnSpan(repoBox, 2);
+        GridPane.setColumnSpan(versionBox, 2);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("restore.title"));
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.getDialogPane().setContent(grid);
+        ButtonType run = new ButtonType(t("restore.run"), ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(run, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(run).disableProperty()
+                .bind(folderField.textProperty().isEmpty().or(versionBox.valueProperty().isNull()));
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() != run) {
+            return;
+        }
+        startRestore(versionBox.getValue(), Path.of(folderField.getText()), fullMode.isSelected(),
+                service.zipPassword().load());
+    }
+
+    /**
+     * Restores in the background. An encrypted backup is first tried with the saved password;
+     * when that is missing or does not fit (an older backup made with another password), the
+     * user is asked and the restore is tried again.
+     */
+    private void startRestore(BackupVersion version, Path parent, boolean full, char[] password) {
+        BackupLog log = (level, line) -> Platform.runLater(() -> appendLog(line));
+        setBusy(true, false, t("state.restoring"));
+        worker.submit(() -> {
+            try {
+                if (full) {
+                    restoreService.restoreRepository(version, parent, password, log);
+                } else {
+                    restoreService.restoreFiles(version, parent, password, log);
+                }
+                Platform.runLater(() -> setBusy(false, false, t("state.restored")));
+            } catch (PasswordRequiredException e) {
+                Platform.runLater(() -> {
+                    setBusy(false, false, t("state.ready"));
+                    char[] entered = askRestorePassword(e.wrongPassword());
+                    if (entered != null) {
+                        startRestore(version, parent, full, entered);
+                    }
+                });
+            } catch (Exception e) {
+                log.error("Restore " + version.fullName() + " : FAILED - " + e.getMessage());
+                Platform.runLater(() -> setBusy(false, false, t("state.restoreFailed")));
+            }
+        });
+    }
+
+    private char[] askRestorePassword(boolean wrong) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("restore.title"));
+        dialog.setHeaderText(t(wrong ? "password.wrong" : "password.needed"));
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        PasswordField field = new PasswordField();
+        field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        field.setPrefWidth(340);
+        dialog.getDialogPane().setContent(field);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(ButtonType.OK).disableProperty().bind(field.textProperty().isEmpty());
+        Platform.runLater(field::requestFocus);
+        Optional<ButtonType> answer = dialog.showAndWait();
+        return answer.isPresent() && answer.get() == ButtonType.OK ? field.getText().toCharArray() : null;
+    }
+
+    private void toggleEncryption() {
+        if (encryptBox.isSelected() && !service.zipPassword().exists() && !showPasswordDialog()) {
+            encryptBox.setSelected(false);
+            return;
+        }
+        config.encrypt = encryptBox.isSelected();
+        if (saveConfig()) {
+            setStatus(t(config.encrypt ? "state.encryptOn" : "state.encryptOff"));
+        }
+    }
+
+    /** Sets or changes the password for new backups. Returns true when one was saved. */
+    private boolean showPasswordDialog() {
+        PasswordField first = new PasswordField();
+        first.setPromptText(t("password.new"));
+        PasswordField second = new PasswordField();
+        second.setPromptText(t("password.repeat"));
+        for (PasswordField field : List.of(first, second)) {
+            field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+            field.setPrefWidth(360);
+        }
+        Label warning = new Label(t("password.warning"));
+        warning.setWrapText(true);
+        warning.setMaxWidth(420);
+        VBox content = new VBox(10, first, second, warning);
+        content.setPadding(new Insets(14));
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("password.title"));
+        dialog.setHeaderText(t("password.header"));
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.getDialogPane().setContent(content);
+        ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(save).disableProperty().bind(
+                first.textProperty().length().lessThan(MIN_PASSWORD_LENGTH)
+                        .or(first.textProperty().isNotEqualTo(second.textProperty())));
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() != save) {
+            return false;
+        }
+        try {
+            service.zipPassword().save(first.getText().toCharArray());
+            setStatus(t("state.passwordSaved"));
+            return true;
+        } catch (IOException e) {
+            appendLog("Could not save the password: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** For example: 2026-11-16 05:45  -  30348cf  -  26 KB. */
+    private static String describe(BackupVersion version) {
+        String time = version.time();
+        return version.date() + " " + time.substring(0, 2) + ":" + time.substring(2, 4)
+                + "  -  " + version.head().substring(0, 7)
+                + "  -  " + formatSize(Math.max(1, version.size() / 1024)).replace("‪", "").replace("‬", "");
+    }
+
+    private void showSignIn() {
+        TokenStore tokens = service.tokens();
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("signIn.title"));
+        dialog.setHeaderText(t("signIn.header"));
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        PasswordField field = new PasswordField();
+        field.setPromptText(t("signIn.prompt"));
+        field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        field.setPrefWidth(420);
+        dialog.getDialogPane().setContent(field);
+        ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
+        ButtonType remove = new ButtonType(t("signIn.remove"), ButtonBar.ButtonData.LEFT);
+        dialog.getDialogPane().getButtonTypes().addAll(save, remove, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(save).disableProperty().bind(field.textProperty().isEmpty());
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() == ButtonType.CANCEL) {
+            return;
+        }
+        try {
+            if (answer.get() == save) {
+                tokens.save(field.getText());
+            } else {
+                tokens.clear();
+            }
+        } catch (IOException e) {
+            appendLog("Could not update the saved token: " + e.getMessage());
+        }
+        reloadList();
+    }
+
+    private void changeLanguage(String language) {
+        if (language.equals(config.language)) {
+            return;
+        }
+        config.language = language;
+        saveConfig();
+        String oldStatus = statusText;
+        text = bundleFor(language);
+        // The status and account lines are re-read from the list in the new language.
+        statusText = oldStatus;
+        Scene scene = stage.getScene();
+        scene.setRoot(buildRoot());
+        applyLanguage(scene);
+        if (tray != null) {
+            tray.show(trayLabels());
+        }
+        if (!busy) {
+            reloadList();
+        }
+    }
+
+    private void applyLanguage(Scene scene) {
+        scene.setNodeOrientation(orientation());
+        stage.setTitle(t("app.title"));
+    }
+
+    private NodeOrientation orientation() {
+        return "ar".equals(config.language) ? NodeOrientation.RIGHT_TO_LEFT : NodeOrientation.LEFT_TO_RIGHT;
+    }
+
+    // --------------------------------------------------------------- helpers
+
+    private void appendLog(String line) {
+        logArea.appendText(line + System.lineSeparator());
+    }
+
+    private void warn(String message) {
+        Alert alert = new Alert(Alert.AlertType.WARNING, message, ButtonType.OK);
+        alert.initOwner(stage);
+        alert.setHeaderText(null);
+        alert.setTitle(t("app.title"));
+        alert.getDialogPane().setNodeOrientation(orientation());
+        alert.showAndWait();
+    }
+
+    private boolean confirm(String message) {
+        Alert alert = new Alert(Alert.AlertType.CONFIRMATION, message, ButtonType.YES, ButtonType.NO);
+        alert.initOwner(stage);
+        alert.setHeaderText(null);
+        alert.setTitle(t("app.title"));
+        alert.getDialogPane().setNodeOrientation(orientation());
+        return alert.showAndWait().filter(button -> button == ButtonType.YES).isPresent();
+    }
+
+    private String t(String key) {
+        return text.getString(key);
+    }
+
+    private static ResourceBundle bundleFor(String language) {
+        return ResourceBundle.getBundle("messages", Locale.forLanguageTag(language),
+                ResourceBundle.Control.getNoFallbackControl(ResourceBundle.Control.FORMAT_PROPERTIES));
+    }
+
+    /** Keeps numbers, units and dates in left-to-right order inside a right-to-left window. */
+    private static String ltr(String value) {
+        return "‪" + value + "‬";
+    }
+
+    private static String formatSize(Long kb) {
+        return ltr(kb >= 1024
+                ? String.format(Locale.ROOT, "%.1f MB", kb / 1024.0)
+                : String.format(Locale.ROOT, "%d KB", kb));
+    }
+
+    /** yyyy-MM-ddTHH:mm:ss becomes yyyy-MM-dd  HH:mm. */
+    private static String formatLocalTime(String iso) {
+        if (iso.length() < 16) {
+            return iso;
+        }
+        return ltr(iso.substring(0, 10) + "  " + iso.substring(11, 16));
+    }
+
+    // ------------------------------------------------------------- dev hooks
+
+    /**
+     * Development aid, inactive unless -Dgitbackup.screenshot=file.png is given: once the list
+     * is shown, saves a picture of the window and exits. With -Dgitbackup.autorun=true it
+     * first runs the backup of the saved selection.
+     */
+    private void devHook() {
+        String target = System.getProperty("gitbackup.screenshot");
+        if (target == null) {
+            return;
+        }
+        if (Boolean.getBoolean("gitbackup.autorun") && !devAutoRunDone && listLoaded) {
+            devAutoRunDone = true;
+            runBackup();
+            return;
+        }
+        PauseTransition settle = new PauseTransition(Duration.millis(600));
+        settle.setOnFinished(event -> {
+            try {
+                WritableImage image = stage.getScene().snapshot(null);
+                PixelReader reader = image.getPixelReader();
+                int width = (int) image.getWidth();
+                int height = (int) image.getHeight();
+                BufferedImage out = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+                for (int y = 0; y < height; y++) {
+                    for (int x = 0; x < width; x++) {
+                        out.setRGB(x, y, reader.getArgb(x, y));
+                    }
+                }
+                ImageIO.write(out, "png", new File(target));
+            } catch (IOException | RuntimeException e) {
+                System.err.println("Screenshot failed: " + e);
+            }
+            Platform.exit();
+        });
+        settle.play();
+    }
+}
