@@ -2,6 +2,8 @@ package com.gitbackup.ui;
 
 import com.gitbackup.backup.BackupLog;
 import com.gitbackup.backup.BackupService;
+import com.gitbackup.backup.RestoreService;
+import com.gitbackup.backup.RestoreService.BackupVersion;
 import com.gitbackup.github.GitHubException;
 import com.gitbackup.github.TokenStore;
 import com.gitbackup.model.AppConfig;
@@ -9,6 +11,7 @@ import com.gitbackup.store.AppPaths;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.text.MessageFormat;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -50,15 +53,18 @@ import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.RadioButton;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.image.PixelReader;
 import javafx.scene.image.WritableImage;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -66,6 +72,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 import javafx.util.Duration;
+import javafx.util.StringConverter;
 import javax.imageio.ImageIO;
 
 /** The application window: pick repositories, pick a folder, run the backup. */
@@ -74,7 +81,9 @@ public class MainApp extends Application {
     private static final String[] LANGUAGES = {"ar", "en"};
     private static final String[] LANGUAGE_NAMES = {"العربية", "English"};
 
-    private final BackupService service = new BackupService(AppPaths.defaults());
+    private final AppPaths paths = AppPaths.defaults();
+    private final BackupService service = new BackupService(paths);
+    private final RestoreService restoreService = new RestoreService(paths);
     private final ExecutorService worker = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "backup-worker");
         thread.setDaemon(true);
@@ -105,6 +114,7 @@ public class MainApp extends Application {
     private Label countLabel;
     private Label statusLabel;
     private TextField searchField;
+    private TableView<RepoRow> repoTable;
     private CheckBox forceBox;
     private ProgressBar progressBar;
     private TextArea logArea;
@@ -190,7 +200,8 @@ public class MainApp extends Application {
         countLabel.getStyleClass().add("count");
         HBox pickRow = row(allButton, noneButton, neededButton, refreshButton, searchField, spacer(), countLabel);
 
-        TableView<RepoRow> table = buildTable();
+        repoTable = buildTable();
+        TableView<RepoRow> table = repoTable;
         VBox.setVgrow(table, Priority.ALWAYS);
 
         runButton = lock(new Button(t("button.run")));
@@ -209,13 +220,16 @@ public class MainApp extends Application {
             stopButton.setDisable(true);
             setStatus(t("state.stopping"));
         });
+        Button restoreButton = lock(new Button(t("button.restore")));
+        restoreButton.setOnAction(event -> showRestore());
         forceBox = lock(new CheckBox(t("check.force")));
         progressBar = new ProgressBar(0);
         progressBar.setPrefWidth(150);
         progressBar.setVisible(false);
         statusLabel = new Label(statusText);
         statusLabel.getStyleClass().add("muted");
-        HBox runRow = row(runButton, saveButton, stopButton, gap(6), forceBox, gap(6), progressBar, statusLabel);
+        HBox runRow = row(runButton, saveButton, stopButton, restoreButton, gap(6), forceBox, gap(6),
+                progressBar, statusLabel);
 
         String previousLog = logArea == null ? "" : logArea.getText();
         logArea = new TextArea(previousLog);
@@ -521,6 +535,144 @@ public class MainApp extends Application {
                 reloadList();
             });
         });
+    }
+
+    /**
+     * Lets the user pick a backed-up repository (including ones no longer on GitHub), one of
+     * its versions and a folder, then restores it into a new sub-folder there.
+     */
+    private void showRestore() {
+        if (busy) {
+            return;
+        }
+        if (config.destination.isBlank()) {
+            warn(t("msg.pickDestination"));
+            return;
+        }
+        Map<String, List<BackupVersion>> backups;
+        try {
+            backups = restoreService.findBackups(Path.of(config.destination));
+        } catch (IOException | RuntimeException e) {
+            appendLog("Could not read the backup folder: " + e.getMessage());
+            setStatus(t("state.restoreFailed"));
+            return;
+        }
+        if (backups.isEmpty()) {
+            warn(t("restore.none"));
+            return;
+        }
+
+        ComboBox<String> repoBox = new ComboBox<>(FXCollections.observableArrayList(backups.keySet()));
+        repoBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        repoBox.setMaxWidth(Double.MAX_VALUE);
+        ComboBox<BackupVersion> versionBox = new ComboBox<>();
+        versionBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        versionBox.setMaxWidth(Double.MAX_VALUE);
+        versionBox.setConverter(new StringConverter<>() {
+            @Override
+            public String toString(BackupVersion version) {
+                return version == null ? "" : describe(version);
+            }
+
+            @Override
+            public BackupVersion fromString(String value) {
+                return null;
+            }
+        });
+        repoBox.setOnAction(event -> {
+            versionBox.getItems().setAll(backups.get(repoBox.getValue()));
+            versionBox.getSelectionModel().selectFirst();
+        });
+        RepoRow highlighted = repoTable.getSelectionModel().getSelectedItem();
+        String initial = highlighted != null && backups.containsKey(highlighted.repo().fullName())
+                ? highlighted.repo().fullName()
+                : backups.keySet().iterator().next();
+        repoBox.setValue(initial);
+        versionBox.getItems().setAll(backups.get(initial));
+        versionBox.getSelectionModel().selectFirst();
+
+        ToggleGroup mode = new ToggleGroup();
+        RadioButton fullMode = new RadioButton(t("restore.modeFull"));
+        fullMode.setToggleGroup(mode);
+        fullMode.setSelected(true);
+        RadioButton filesMode = new RadioButton(t("restore.modeFiles"));
+        filesMode.setToggleGroup(mode);
+
+        TextField folderField = new TextField();
+        folderField.setEditable(false);
+        folderField.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        folderField.setPrefWidth(380);
+        Button folderButton = new Button(t("button.browse"));
+        folderButton.setOnAction(event -> {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle(t("restore.chooser"));
+            File chosen = chooser.showDialog(stage);
+            if (chosen != null) {
+                folderField.setText(chosen.getAbsolutePath());
+            }
+        });
+        Label note = new Label(t("restore.note"));
+        note.getStyleClass().add("muted");
+        note.setWrapText(true);
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(14));
+        grid.addRow(0, new Label(t("restore.repo")), repoBox);
+        grid.addRow(1, new Label(t("restore.version")), versionBox);
+        grid.add(fullMode, 1, 2);
+        grid.add(filesMode, 1, 3);
+        grid.addRow(4, new Label(t("restore.folder")), folderField, folderButton);
+        grid.add(note, 1, 5, 2, 1);
+        GridPane.setHgrow(repoBox, Priority.ALWAYS);
+        GridPane.setColumnSpan(repoBox, 2);
+        GridPane.setColumnSpan(versionBox, 2);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("restore.title"));
+        dialog.setHeaderText(null);
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.getDialogPane().setContent(grid);
+        ButtonType run = new ButtonType(t("restore.run"), ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(run, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(run).disableProperty()
+                .bind(folderField.textProperty().isEmpty().or(versionBox.valueProperty().isNull()));
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() != run) {
+            return;
+        }
+        BackupVersion version = versionBox.getValue();
+        Path parent = Path.of(folderField.getText());
+        boolean full = fullMode.isSelected();
+        BackupLog log = (level, line) -> Platform.runLater(() -> appendLog(line));
+        setBusy(true, false, t("state.restoring"));
+        worker.submit(() -> {
+            String result;
+            try {
+                if (full) {
+                    restoreService.restoreRepository(version, parent, log);
+                } else {
+                    restoreService.restoreFiles(version, parent, log);
+                }
+                result = "state.restored";
+            } catch (Exception e) {
+                log.error("Restore " + version.fullName() + " : FAILED - " + e.getMessage());
+                result = "state.restoreFailed";
+            }
+            String key = result;
+            Platform.runLater(() -> setBusy(false, false, t(key)));
+        });
+    }
+
+    /** For example: 2026-11-16 05:45  -  30348cf  -  26 KB. */
+    private static String describe(BackupVersion version) {
+        String time = version.time();
+        return version.date() + " " + time.substring(0, 2) + ":" + time.substring(2, 4)
+                + "  -  " + version.head().substring(0, 7)
+                + "  -  " + formatSize(Math.max(1, version.size() / 1024)).replace("‪", "").replace("‬", "");
     }
 
     private void showSignIn() {
