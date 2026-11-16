@@ -8,6 +8,7 @@ import com.gitbackup.model.BackupState;
 import com.gitbackup.model.RepoInfo;
 import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.JsonStore;
+import com.gitbackup.store.SecretFile;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
@@ -61,14 +62,21 @@ public final class BackupService {
 
     private final AppPaths paths;
     private final TokenStore tokens;
+    private final SecretFile zipPassword;
 
     public BackupService(AppPaths paths) {
         this.paths = paths;
         this.tokens = new TokenStore(paths.tokenFile());
+        this.zipPassword = new SecretFile(paths.zipPasswordFile());
     }
 
     public TokenStore tokens() {
         return tokens;
+    }
+
+    /** The saved password for encrypted ZIP files. */
+    public SecretFile zipPassword() {
+        return zipPassword;
     }
 
     public AppConfig loadConfig() throws IOException {
@@ -163,7 +171,17 @@ public final class BackupService {
         log.info("=== GitHub backup started ===");
         AppConfig config = loadConfig();
         Path destination = prepareDestination(config);
-        log.info("Destination: " + destination + " (keeping " + config.keepVersions + " version(s) per repository)");
+        log.info("Destination: " + destination + " (keeping " + config.keepVersions + " version(s) per repository"
+                + (config.encrypt ? ", encrypted" : "") + ")");
+        char[] password = null;
+        if (config.encrypt) {
+            password = zipPassword.load();
+            if (password == null) {
+                // Never fall back to unencrypted files when the user asked for encryption.
+                throw new IOException("Encryption is on but no password is saved on this computer. "
+                        + "Set the password in the application first.");
+            }
+        }
 
         TokenStore.Resolved token = requireToken();
         List<RepoInfo> all = new GitHubClient(token.token()).listOwnedRepos();
@@ -179,6 +197,7 @@ public final class BackupService {
         BackupState state = JsonStore.readState(stateFile);
         CredentialsProvider credentials = new UsernamePasswordCredentialsProvider("x-access-token", token.token());
         BackupEngine engine = new BackupEngine(paths, log);
+        engine.setZipPassword(password);
 
         int backedUp = 0;
         int unchanged = 0;

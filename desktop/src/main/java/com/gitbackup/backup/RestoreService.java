@@ -10,15 +10,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.exception.ZipException;
+import net.lingala.zip4j.model.FileHeader;
 import org.eclipse.jgit.api.CreateBranchCommand;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.Constants;
@@ -91,22 +91,23 @@ public final class RestoreService {
      * Restores the full repository (every commit, branch and tag) as a working copy in
      * {@code parent/name}, with "origin" pointing back at GitHub. Returns the new folder.
      *
+     * @param password the ZIP password; may be null for a backup that is not encrypted
+     * @throws PasswordRequiredException if the ZIP is encrypted and the password is missing or wrong
      * @throws IOException if the target folder already has content; nothing is overwritten
      */
-    public Path restoreRepository(BackupVersion version, Path parent, BackupLog log) throws Exception {
+    public Path restoreRepository(BackupVersion version, Path parent, char[] password, BackupLog log)
+            throws Exception {
         Path target = prepareTarget(version, parent);
         paths.createDirectories();
         Path bundle = paths.tmpDir().resolve("restore-" + version.name() + ".bundle");
         log.info("Restore " + version.fullName() + " : reading " + version.zip().getFileName());
         try {
-            try (ZipFile zip = new ZipFile(version.zip().toFile())) {
-                ZipEntry entry = zip.getEntry(version.name() + ".bundle");
+            try (ZipFile zip = open(version, password)) {
+                FileHeader entry = zip.getFileHeader(version.name() + ".bundle");
                 if (entry == null) {
                     throw new IOException("This ZIP has no history bundle; only its files can be restored.");
                 }
-                try (InputStream in = zip.getInputStream(entry)) {
-                    Files.copy(in, bundle, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                }
+                copyEntry(zip, entry, bundle);
             }
             String branch = recordedBranch(version);
             try (Git git = Git.cloneRepository()
@@ -142,25 +143,23 @@ public final class RestoreService {
     }
 
     /** Restores only the files of the default branch (no history) into {@code parent/name}. */
-    public Path restoreFiles(BackupVersion version, Path parent, BackupLog log) throws IOException {
+    public Path restoreFiles(BackupVersion version, Path parent, char[] password, BackupLog log)
+            throws IOException {
         Path target = prepareTarget(version, parent);
         log.info("Restore " + version.fullName() + " : extracting files from " + version.zip().getFileName());
         int count = 0;
-        try (ZipFile zip = new ZipFile(version.zip().toFile())) {
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                if (!entry.getName().startsWith(SOURCE_PREFIX) || entry.isDirectory()) {
+        try (ZipFile zip = open(version, password)) {
+            for (FileHeader entry : zip.getFileHeaders()) {
+                String name = entry.getFileName().replace('\\', '/');
+                if (!name.startsWith(SOURCE_PREFIX) || entry.isDirectory()) {
                     continue;
                 }
-                Path file = target.resolve(entry.getName().substring(SOURCE_PREFIX.length())).normalize();
+                Path file = target.resolve(name.substring(SOURCE_PREFIX.length())).normalize();
                 if (!file.startsWith(target)) {
-                    throw new IOException("Unsafe path inside the ZIP: " + entry.getName());
+                    throw new IOException("Unsafe path inside the ZIP: " + name);
                 }
                 Files.createDirectories(file.getParent());
-                try (InputStream in = zip.getInputStream(entry)) {
-                    Files.copy(in, file);
-                }
+                copyEntry(zip, entry, file);
                 count++;
             }
         } catch (IOException | RuntimeException e) {
@@ -169,6 +168,29 @@ public final class RestoreService {
         }
         log.ok("Restore " + version.fullName() + " : done, " + count + " files -> " + target);
         return target;
+    }
+
+    private static ZipFile open(BackupVersion version, char[] password) throws IOException {
+        ZipFile zip = new ZipFile(version.zip().toFile());
+        if (zip.isEncrypted()) {
+            if (password == null || password.length == 0) {
+                zip.close();
+                throw new PasswordRequiredException(false);
+            }
+            zip.setPassword(password);
+        }
+        return zip;
+    }
+
+    private static void copyEntry(ZipFile zip, FileHeader entry, Path file) throws IOException {
+        try (InputStream in = zip.getInputStream(entry)) {
+            Files.copy(in, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (ZipException e) {
+            if (e.getType() == ZipException.Type.WRONG_PASSWORD) {
+                throw new PasswordRequiredException(true);
+            }
+            throw e;
+        }
     }
 
     /** The new folder parent/name; it must not already contain anything. */

@@ -17,6 +17,8 @@ public class AppConfig {
     public List<String> exclude = new ArrayList<>();
     public boolean includeForks = false;
     public boolean includeArchived = true;
+    /** Protect new ZIP files with the saved password (AES-256). */
+    public boolean encrypt = false;
     /** Interface language: "ar" or "en". */
     public String language = "ar";
 }

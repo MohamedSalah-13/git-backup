@@ -40,6 +40,10 @@ public final class AppPaths {
         return home.resolve("token.bin");
     }
 
+    public Path zipPasswordFile() {
+        return home.resolve("zip-password.bin");
+    }
+
     public Path lockFile() {
         return home.resolve("run.lock");
     }

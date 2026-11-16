@@ -24,10 +24,13 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipOutputStream;
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.io.outputstream.ZipOutputStream;
+import net.lingala.zip4j.model.FileHeader;
+import net.lingala.zip4j.model.ZipParameters;
+import net.lingala.zip4j.model.enums.AesKeyStrength;
+import net.lingala.zip4j.model.enums.CompressionMethod;
+import net.lingala.zip4j.model.enums.EncryptionMethod;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.lib.Constants;
@@ -71,10 +74,24 @@ public final class BackupEngine {
 
     private final AppPaths paths;
     private final BackupLog log;
+    private char[] zipPassword;
 
     public BackupEngine(AppPaths paths, BackupLog log) {
         this.paths = paths;
         this.log = log;
+    }
+
+    /**
+     * With a password, new ZIP files are encrypted with AES-256 (the standard ZIP AES format,
+     * which 7-Zip and WinRAR open). File names inside the ZIP stay readable; contents do not.
+     * Null or empty turns encryption off.
+     */
+    public void setZipPassword(char[] password) {
+        this.zipPassword = password == null || password.length == 0 ? null : password.clone();
+    }
+
+    private boolean encrypting() {
+        return zipPassword != null;
     }
 
     /**
@@ -95,7 +112,7 @@ public final class BackupEngine {
             }
 
             Path repoDir = destination.resolve(repo.owner()).resolve(repo.name());
-            String reason = reasonToBackUp(state.repos.get(full), fingerprint, repoDir, force);
+            String reason = reasonToBackUp(state.repos.get(full), fingerprint, repoDir, force, encrypting());
             if (reason == null) {
                 log.info(full + " : unchanged, skipped");
                 return new Result(repo, Outcome.UNCHANGED, 0);
@@ -128,6 +145,7 @@ public final class BackupEngine {
             entry.head = head;
             entry.file = zipName;
             entry.size = size;
+            entry.encrypted = encrypting();
             entry.backedUp = LocalDateTime.now().format(JsonStore.ISO_LOCAL);
             state.repos.put(full, entry);
             JsonStore.writeState(stateFile, state);
@@ -135,7 +153,8 @@ public final class BackupEngine {
             // The new backup is safely in place: now older versions can go.
             int removed = pruneOldBackups(repoDir, repo.name(), zipName, keepVersions);
             String extra = removed > 0 ? ", removed " + removed + " old version(s)" : "";
-            log.ok(full + " : saved " + zipName + " (" + files + " files, " + formatSize(size) + ")" + extra);
+            log.ok(full + " : saved " + zipName + " (" + files + " files, " + formatSize(size)
+                    + (encrypting() ? ", encrypted" : "") + ")" + extra);
             return new Result(repo, Outcome.BACKED_UP, removed);
         } catch (Exception e) {
             log.error(full + " : FAILED - " + describe(e));
@@ -146,8 +165,8 @@ public final class BackupEngine {
     }
 
     /** Null when the last backup is still valid, otherwise why a new one is needed. */
-    private static String reasonToBackUp(BackupState.Entry previous, String fingerprint, Path repoDir, boolean force)
-            throws IOException {
+    private static String reasonToBackUp(BackupState.Entry previous, String fingerprint, Path repoDir, boolean force,
+                                         boolean encrypt) throws IOException {
         if (force) {
             return "forced";
         }
@@ -156,6 +175,9 @@ public final class BackupEngine {
         }
         if (!fingerprint.equals(previous.fingerprint)) {
             return "changed on GitHub";
+        }
+        if (previous.encrypted != encrypt) {
+            return encrypt ? "encryption was turned on" : "encryption was turned off";
         }
         if (previous.file == null || previous.file.isBlank()) {
             return "backup file is missing";
@@ -268,7 +290,10 @@ public final class BackupEngine {
             long bundleSize = Files.size(bundle);
 
             int files = 0;
-            try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(Files.newOutputStream(outZip)));
+            OutputStream fileOut = new BufferedOutputStream(Files.newOutputStream(outZip));
+            try (ZipOutputStream zip = encrypting()
+                         ? new ZipOutputStream(fileOut, zipPassword)
+                         : new ZipOutputStream(fileOut);
                  RevWalk walk = new RevWalk(db);
                  TreeWalk tree = new TreeWalk(db)) {
                 RevCommit commit = walk.parseCommit(headId);
@@ -279,25 +304,21 @@ public final class BackupEngine {
                     if (tree.getFileMode(0) == FileMode.GITLINK) {
                         continue; // a submodule is another repository, not a file
                     }
-                    ZipEntry entry = new ZipEntry("source/" + tree.getPathString());
-                    entry.setTime(commitTime);
-                    zip.putNextEntry(entry);
+                    zip.putNextEntry(entry("source/" + tree.getPathString(), commitTime));
                     db.open(tree.getObjectId(0)).copyTo(zip);
                     zip.closeEntry();
                     files++;
                 }
 
                 // The bundle is already compressed, so it is stored as-is.
-                ZipEntry bundleEntry = new ZipEntry(bundleName);
-                bundleEntry.setMethod(ZipEntry.STORED);
-                bundleEntry.setSize(bundleSize);
-                bundleEntry.setCompressedSize(bundleSize);
-                bundleEntry.setCrc(crcOf(bundle));
+                ZipParameters bundleEntry = entry(bundleName, System.currentTimeMillis());
+                bundleEntry.setCompressionMethod(CompressionMethod.STORE);
+                bundleEntry.setEntrySize(bundleSize);
                 zip.putNextEntry(bundleEntry);
                 Files.copy(bundle, zip);
                 zip.closeEntry();
 
-                zip.putNextEntry(new ZipEntry("RESTORE.txt"));
+                zip.putNextEntry(entry("RESTORE.txt", System.currentTimeMillis()));
                 zip.write(restoreNotes(repo, head).getBytes(StandardCharsets.UTF_8));
                 zip.closeEntry();
             }
@@ -333,14 +354,35 @@ public final class BackupEngine {
         }
     }
 
-    private static void verifyZip(Path zip, int expectedEntries, String bundleName, long bundleSize) throws IOException {
-        try (ZipFile file = new ZipFile(zip.toFile())) {
-            if (file.size() != expectedEntries) {
-                throw new IOException("ZIP check failed: " + file.size() + " entries, expected " + expectedEntries + ".");
+    private ZipParameters entry(String name, long time) {
+        ZipParameters parameters = new ZipParameters();
+        parameters.setFileNameInZip(name);
+        parameters.setLastModifiedFileTime(time);
+        if (encrypting()) {
+            parameters.setEncryptFiles(true);
+            parameters.setEncryptionMethod(EncryptionMethod.AES);
+            parameters.setAesKeyStrength(AesKeyStrength.KEY_STRENGTH_256);
+        }
+        return parameters;
+    }
+
+    /** Reopens the finished ZIP (with the password when encrypted) before it replaces anything. */
+    private void verifyZip(Path zip, int expectedEntries, String bundleName, long bundleSize) throws IOException {
+        try (ZipFile file = new ZipFile(zip.toFile(), zipPassword)) {
+            int entries = file.getFileHeaders().size();
+            if (entries != expectedEntries) {
+                throw new IOException("ZIP check failed: " + entries + " entries, expected " + expectedEntries + ".");
             }
-            ZipEntry bundle = file.getEntry(bundleName);
-            if (bundle == null || bundle.getSize() != bundleSize) {
+            FileHeader bundle = file.getFileHeader(bundleName);
+            if (bundle == null || bundle.getUncompressedSize() != bundleSize) {
                 throw new IOException("ZIP check failed: the history bundle is missing or incomplete.");
+            }
+            if (file.isEncrypted() != encrypting()) {
+                throw new IOException("ZIP check failed: encryption does not match the setting.");
+            }
+            // Reading an entry back proves the password opens the file.
+            try (InputStream in = file.getInputStream(file.getFileHeader("RESTORE.txt"))) {
+                in.readAllBytes();
             }
         }
     }
@@ -403,18 +445,6 @@ public final class BackupEngine {
 
     private static Repository openBare(Path mirror) throws IOException {
         return new FileRepositoryBuilder().setGitDir(mirror.toFile()).setMustExist(true).build();
-    }
-
-    private static long crcOf(Path file) throws IOException {
-        CRC32 crc = new CRC32();
-        byte[] buffer = new byte[64 * 1024];
-        try (InputStream in = Files.newInputStream(file)) {
-            int read;
-            while ((read = in.read(buffer)) > 0) {
-                crc.update(buffer, 0, read);
-            }
-        }
-        return crc.getValue();
     }
 
     private static void deleteRecursively(Path dir) throws IOException {

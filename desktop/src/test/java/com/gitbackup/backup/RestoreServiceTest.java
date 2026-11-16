@@ -77,7 +77,7 @@ class RestoreServiceTest {
 
     @Test
     void restoresFullRepositoryOnItsDefaultBranch() throws Exception {
-        Path target = restore.restoreRepository(newest(), parent, QUIET);
+        Path target = restore.restoreRepository(newest(), parent, null, QUIET);
 
         assertEquals(parent.resolve("demo").toAbsolutePath(), target);
         try (Git git = Git.open(target.toFile())) {
@@ -95,7 +95,7 @@ class RestoreServiceTest {
 
     @Test
     void restoresFilesOnlyWithoutHistory() throws Exception {
-        Path target = restore.restoreFiles(newest(), parent, QUIET);
+        Path target = restore.restoreFiles(newest(), parent, null, QUIET);
 
         assertEquals("hello\n", Files.readString(target.resolve("README.md")));
         assertTrue(Files.exists(target.resolve("src/Main.java")));
@@ -108,8 +108,8 @@ class RestoreServiceTest {
         Path existing = Files.createDirectories(parent.resolve("demo"));
         Files.writeString(existing.resolve("mine.txt"), "keep me");
 
-        assertThrows(IOException.class, () -> restore.restoreRepository(newest(), parent, QUIET));
-        assertThrows(IOException.class, () -> restore.restoreFiles(newest(), parent, QUIET));
+        assertThrows(IOException.class, () -> restore.restoreRepository(newest(), parent, null, QUIET));
+        assertThrows(IOException.class, () -> restore.restoreFiles(newest(), parent, null, QUIET));
         assertEquals("keep me", Files.readString(existing.resolve("mine.txt")));
     }
 

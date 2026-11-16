@@ -24,6 +24,8 @@ public class BackupState {
         /** ZIP file name inside the repository's folder. */
         public String file = "";
         public long size;
+        /** True when the ZIP is password-protected. */
+        public boolean encrypted;
         /** Local time, yyyy-MM-ddTHH:mm:ss. */
         public String backedUp = "";
     }

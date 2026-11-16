@@ -2,6 +2,7 @@ package com.gitbackup.ui;
 
 import com.gitbackup.backup.BackupLog;
 import com.gitbackup.backup.BackupService;
+import com.gitbackup.backup.PasswordRequiredException;
 import com.gitbackup.backup.RestoreService;
 import com.gitbackup.backup.RestoreService.BackupVersion;
 import com.gitbackup.github.GitHubException;
@@ -78,6 +79,7 @@ import javax.imageio.ImageIO;
 /** The application window: pick repositories, pick a folder, run the backup. */
 public class MainApp extends Application {
     private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("yyyy-MM-dd  HH:mm", Locale.ROOT);
+    private static final int MIN_PASSWORD_LENGTH = 8;
     private static final String[] LANGUAGES = {"ar", "en"};
     private static final String[] LANGUAGE_NAMES = {"العربية", "English"};
 
@@ -115,6 +117,7 @@ public class MainApp extends Application {
     private Label statusLabel;
     private TextField searchField;
     private TableView<RepoRow> repoTable;
+    private CheckBox encryptBox;
     private CheckBox forceBox;
     private ProgressBar progressBar;
     private TextArea logArea;
@@ -182,7 +185,12 @@ public class MainApp extends Application {
         languageBox = lock(new ComboBox<String>(FXCollections.observableArrayList(LANGUAGE_NAMES)));
         languageBox.getSelectionModel().select("en".equals(config.language) ? 1 : 0);
         languageBox.setOnAction(event -> changeLanguage(LANGUAGES[languageBox.getSelectionModel().getSelectedIndex()]));
-        HBox accountRow = row(accountLabel, signInButton, spacer(), languageBox);
+        encryptBox = lock(new CheckBox(t("check.encrypt")));
+        encryptBox.setSelected(config.encrypt);
+        encryptBox.setOnAction(event -> toggleEncryption());
+        Button passwordButton = lock(new Button(t("button.password")));
+        passwordButton.setOnAction(event -> showPasswordDialog());
+        HBox accountRow = row(accountLabel, signInButton, gap(14), encryptBox, passwordButton, spacer(), languageBox);
 
         Button allButton = lock(new Button(t("button.selectAll")));
         allButton.setOnAction(event -> tickVisible(row -> true));
@@ -644,27 +652,109 @@ public class MainApp extends Application {
         if (answer.isEmpty() || answer.get() != run) {
             return;
         }
-        BackupVersion version = versionBox.getValue();
-        Path parent = Path.of(folderField.getText());
-        boolean full = fullMode.isSelected();
+        startRestore(versionBox.getValue(), Path.of(folderField.getText()), fullMode.isSelected(),
+                service.zipPassword().load());
+    }
+
+    /**
+     * Restores in the background. An encrypted backup is first tried with the saved password;
+     * when that is missing or does not fit (an older backup made with another password), the
+     * user is asked and the restore is tried again.
+     */
+    private void startRestore(BackupVersion version, Path parent, boolean full, char[] password) {
         BackupLog log = (level, line) -> Platform.runLater(() -> appendLog(line));
         setBusy(true, false, t("state.restoring"));
         worker.submit(() -> {
-            String result;
             try {
                 if (full) {
-                    restoreService.restoreRepository(version, parent, log);
+                    restoreService.restoreRepository(version, parent, password, log);
                 } else {
-                    restoreService.restoreFiles(version, parent, log);
+                    restoreService.restoreFiles(version, parent, password, log);
                 }
-                result = "state.restored";
+                Platform.runLater(() -> setBusy(false, false, t("state.restored")));
+            } catch (PasswordRequiredException e) {
+                Platform.runLater(() -> {
+                    setBusy(false, false, t("state.ready"));
+                    char[] entered = askRestorePassword(e.wrongPassword());
+                    if (entered != null) {
+                        startRestore(version, parent, full, entered);
+                    }
+                });
             } catch (Exception e) {
                 log.error("Restore " + version.fullName() + " : FAILED - " + e.getMessage());
-                result = "state.restoreFailed";
+                Platform.runLater(() -> setBusy(false, false, t("state.restoreFailed")));
             }
-            String key = result;
-            Platform.runLater(() -> setBusy(false, false, t(key)));
         });
+    }
+
+    private char[] askRestorePassword(boolean wrong) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("restore.title"));
+        dialog.setHeaderText(t(wrong ? "password.wrong" : "password.needed"));
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        PasswordField field = new PasswordField();
+        field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        field.setPrefWidth(340);
+        dialog.getDialogPane().setContent(field);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(ButtonType.OK).disableProperty().bind(field.textProperty().isEmpty());
+        Platform.runLater(field::requestFocus);
+        Optional<ButtonType> answer = dialog.showAndWait();
+        return answer.isPresent() && answer.get() == ButtonType.OK ? field.getText().toCharArray() : null;
+    }
+
+    private void toggleEncryption() {
+        if (encryptBox.isSelected() && !service.zipPassword().exists() && !showPasswordDialog()) {
+            encryptBox.setSelected(false);
+            return;
+        }
+        config.encrypt = encryptBox.isSelected();
+        if (saveConfig()) {
+            setStatus(t(config.encrypt ? "state.encryptOn" : "state.encryptOff"));
+        }
+    }
+
+    /** Sets or changes the password for new backups. Returns true when one was saved. */
+    private boolean showPasswordDialog() {
+        PasswordField first = new PasswordField();
+        first.setPromptText(t("password.new"));
+        PasswordField second = new PasswordField();
+        second.setPromptText(t("password.repeat"));
+        for (PasswordField field : List.of(first, second)) {
+            field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+            field.setPrefWidth(360);
+        }
+        Label warning = new Label(t("password.warning"));
+        warning.setWrapText(true);
+        warning.setMaxWidth(420);
+        VBox content = new VBox(10, first, second, warning);
+        content.setPadding(new Insets(14));
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle(t("password.title"));
+        dialog.setHeaderText(t("password.header"));
+        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.getDialogPane().setContent(content);
+        ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(save).disableProperty().bind(
+                first.textProperty().length().lessThan(MIN_PASSWORD_LENGTH)
+                        .or(first.textProperty().isNotEqualTo(second.textProperty())));
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() != save) {
+            return false;
+        }
+        try {
+            service.zipPassword().save(first.getText().toCharArray());
+            setStatus(t("state.passwordSaved"));
+            return true;
+        } catch (IOException e) {
+            appendLog("Could not save the password: " + e.getMessage());
+            return false;
+        }
     }
 
     /** For example: 2026-11-16 05:45  -  30348cf  -  26 KB. */
