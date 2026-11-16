@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the project's checks before every "git push". The push is refused when they fail.
+# Skip once with:  git push --no-verify
+# Enable after cloning with:  git config core.hooksPath .githooks
+exec powershell.exe -NoProfile -File "$(git rev-parse --show-toplevel)/.githooks/pre-push.ps1"
