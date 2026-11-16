@@ -1,0 +1,5 @@
+# Local working data: downloaded mirrors, temporary files, logs
+work/
+
+# Personal settings (destination folder, selected repositories). See config.example.json
+config.json

@@ -1,0 +1,11 @@
+{
+  "destination": "",
+  "keepVersions": 3,
+  "include": [],
+  "owners": [],
+  "exclude": [],
+  "includeForks": false,
+  "includeArchived": true,
+  "workDir": "",
+  "keepMirrors": true
+}
