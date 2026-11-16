@@ -19,6 +19,12 @@ public class AppConfig {
     public boolean includeArchived = true;
     /** Protect new ZIP files with the saved password (AES-256). */
     public boolean encrypt = false;
+    /** Run the backup by itself once a day while the application is open or in the tray. */
+    public boolean scheduleEnabled = false;
+    /** Time of the daily run, HH:mm (24-hour). */
+    public String scheduleTime = "21:00";
+    /** Date (yyyy-MM-dd) of the last automatic run that started; written by the application. */
+    public String lastAutoRun = "";
     /** Interface language: "ar" or "en". */
     public String language = "ar";
 }

@@ -5,6 +5,15 @@ import com.gitbackup.backup.BackupService;
 import com.gitbackup.backup.PasswordRequiredException;
 import com.gitbackup.backup.RestoreService;
 import com.gitbackup.backup.RestoreService.BackupVersion;
+import com.gitbackup.backup.Schedule;
+import com.gitbackup.store.AutoStart;
+import com.gitbackup.store.SingleInstance;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
+import javafx.scene.image.Image;
 import com.gitbackup.github.GitHubException;
 import com.gitbackup.github.TokenStore;
 import com.gitbackup.model.AppConfig;
@@ -80,6 +89,9 @@ import javax.imageio.ImageIO;
 public class MainApp extends Application {
     private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("yyyy-MM-dd  HH:mm", Locale.ROOT);
     private static final int MIN_PASSWORD_LENGTH = 8;
+    /** Gives Google Drive and the network time to come up after Windows starts. */
+    private static final long STARTUP_DELAY_MS = 90_000;
+    private static final long RETRY_DELAY_MS = 10 * 60_000;
     private static final String[] LANGUAGES = {"ar", "en"};
     private static final String[] LANGUAGE_NAMES = {"العربية", "English"};
 
@@ -108,6 +120,11 @@ public class MainApp extends Application {
     private String statusText = "";
     private String statusAfterList;
     private boolean devAutoRunDone;
+    private SingleInstance instance;
+    private TrayIconSupport tray;
+    private boolean trayHintShown;
+    private final long startedAt = System.currentTimeMillis();
+    private long autoRetryAfter;
 
     // Controls are rebuilt when the language changes.
     private TextField destinationField;
@@ -118,6 +135,10 @@ public class MainApp extends Application {
     private TextField searchField;
     private TableView<RepoRow> repoTable;
     private CheckBox encryptBox;
+    private CheckBox scheduleBox;
+    private ComboBox<String> hourBox;
+    private ComboBox<String> minuteBox;
+    private CheckBox autoStartBox;
     private CheckBox forceBox;
     private ProgressBar progressBar;
     private TextArea logArea;
@@ -139,26 +160,195 @@ public class MainApp extends Application {
         accountText = t("label.account.none");
         statusText = t("state.loading");
 
-        Scene scene = new Scene(buildRoot(), 1080, 720);
+        // One window per user: a second start only brings the first one back.
+        try {
+            instance = SingleInstance.acquire(paths, () -> Platform.runLater(this::showWindow));
+            if (instance == null) {
+                Platform.exit();
+                return;
+            }
+        } catch (IOException e) {
+            instance = null; // cannot guard; opening a window is still better than not starting
+        }
+
+        Scene scene = new Scene(buildRoot(), 1080, 760);
         scene.getStylesheets().add(MainApp.class.getResource("/app.css").toExternalForm());
-        applyLanguage(scene);
         stage.setScene(scene);
+        applyLanguage(scene);
+        for (String size : List.of("16", "32", "48", "256")) {
+            stage.getIcons().add(new Image(MainApp.class.getResource("/icon-" + size + ".png").toExternalForm()));
+        }
         stage.setMinWidth(920);
-        stage.setMinHeight(560);
+        stage.setMinHeight(600);
+
+        boolean devRun = System.getProperty("gitbackup.screenshot") != null;
+        if (TrayIconSupport.supported() && !devRun) {
+            tray = new TrayIconSupport(this::showWindow, this::backupFromTray, this::exitApplication);
+            tray.show(trayLabels());
+            Platform.setImplicitExit(false); // closing the window keeps the tray icon alive
+        }
         stage.setOnCloseRequest(event -> {
-            if (backupRunning && !confirm(t("msg.closeRunning"))) {
-                event.consume();
+            event.consume();
+            if (tray != null && tray.active()) {
+                stage.hide();
+                if (!trayHintShown) {
+                    trayHintShown = true;
+                    tray.notify(t("app.title"), t("tray.hint"), false);
+                }
+            } else {
+                exitApplication();
             }
         });
         rows.addListener((ListChangeListener<RepoRow>) change -> updateCount());
-        stage.show();
-        scene.getRoot().requestFocus(); // otherwise the folder field starts selected
+
+        boolean startHidden = tray != null && getParameters().getRaw().contains("--tray");
+        if (startHidden) {
+            // If the tray icon could not be created there would be no way to reach the program.
+            PauseTransition check = new PauseTransition(Duration.seconds(4));
+            check.setOnFinished(event -> {
+                if (!tray.active()) {
+                    showWindow();
+                }
+            });
+            check.play();
+        } else {
+            stage.show();
+            scene.getRoot().requestFocus(); // otherwise the folder field starts selected
+        }
+
+        Timeline clock = new Timeline(new KeyFrame(Duration.seconds(30), event -> checkSchedule()));
+        clock.setCycleCount(Timeline.INDEFINITE);
+        clock.play();
         reloadList();
     }
 
     @Override
     public void stop() {
         worker.shutdownNow();
+        if (tray != null) {
+            tray.remove();
+        }
+        if (instance != null) {
+            instance.close();
+        }
+        // The AWT thread behind the tray icon would otherwise keep the process alive.
+        System.exit(0);
+    }
+
+    private void showWindow() {
+        if (!stage.isShowing()) {
+            stage.show();
+        }
+        stage.setIconified(false);
+        stage.toFront();
+        stage.requestFocus();
+    }
+
+    private void exitApplication() {
+        if (backupRunning) {
+            showWindow();
+            if (!confirm(t("msg.closeRunning"))) {
+                return;
+            }
+        }
+        Platform.exit();
+    }
+
+    private TrayIconSupport.Labels trayLabels() {
+        return new TrayIconSupport.Labels(t("app.title"), t("tray.open"), t("tray.backup"), t("tray.exit"));
+    }
+
+    private void backupFromTray() {
+        if (busy || config.destination.isBlank()) {
+            showWindow();
+            return;
+        }
+        startBackup(false, false);
+    }
+
+    // -------------------------------------------------------------- schedule
+
+    /** Called every 30 seconds: starts today's automatic backup when its time has come. */
+    private void checkSchedule() {
+        long now = System.currentTimeMillis();
+        if (busy || config.destination.isBlank() || now - startedAt < STARTUP_DELAY_MS || now < autoRetryAfter) {
+            return;
+        }
+        if (Schedule.isDue(config.scheduleEnabled, config.scheduleTime, config.lastAutoRun, LocalDateTime.now())) {
+            startBackup(true, false);
+        }
+    }
+
+    private void afterScheduledRun(BackupService.Summary summary, String startedOn) {
+        if (summary.started()) {
+            config.lastAutoRun = startedOn;
+            saveConfig();
+        } else {
+            // For example Google Drive was not running yet: try again later, not every 30 seconds.
+            autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
+        }
+        if (summary.exitCode() != 0 && tray != null) {
+            tray.notify(t("app.title"), t(summary.started() ? "tray.failedSome" : "tray.failedStart"), true);
+        }
+    }
+
+    private void saveSchedule() {
+        config.scheduleEnabled = scheduleBox.isSelected();
+        config.scheduleTime = hourBox.getValue() + ":" + minuteBox.getValue();
+        if (saveConfig()) {
+            setStatus(config.scheduleEnabled
+                    ? MessageFormat.format(t("state.scheduleOn"), ltr(config.scheduleTime))
+                    : t("state.scheduleOff"));
+        }
+    }
+
+    private void toggleAutoStart() {
+        try {
+            AutoStart.setEnabled(autoStartBox.isSelected());
+        } catch (RuntimeException e) {
+            appendLog("Could not change start with Windows: " + e.getMessage());
+            autoStartBox.setSelected(AutoStart.isEnabled());
+        }
+    }
+
+    private HBox buildScheduleRow() {
+        scheduleBox = new CheckBox(t("check.schedule"));
+        scheduleBox.setSelected(config.scheduleEnabled);
+        LocalTime time = Schedule.parseTime(config.scheduleTime);
+        if (time == null) {
+            time = LocalTime.of(21, 0);
+        }
+        hourBox = new ComboBox<>();
+        for (int hour = 0; hour < 24; hour++) {
+            hourBox.getItems().add(String.format(Locale.ROOT, "%02d", hour));
+        }
+        minuteBox = new ComboBox<>();
+        for (int minute = 0; minute < 60; minute += 5) {
+            minuteBox.getItems().add(String.format(Locale.ROOT, "%02d", minute));
+        }
+        String minute = String.format(Locale.ROOT, "%02d", time.getMinute());
+        if (!minuteBox.getItems().contains(minute)) {
+            minuteBox.getItems().add(minute);
+        }
+        hourBox.setValue(String.format(Locale.ROOT, "%02d", time.getHour()));
+        minuteBox.setValue(minute);
+        HBox timeBox = new HBox(4, hourBox, new Label(":"), minuteBox);
+        timeBox.setAlignment(Pos.CENTER_LEFT);
+        timeBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        scheduleBox.setOnAction(event -> saveSchedule());
+        hourBox.setOnAction(event -> saveSchedule());
+        minuteBox.setOnAction(event -> saveSchedule());
+
+        autoStartBox = new CheckBox(t("check.autostart"));
+        autoStartBox.setSelected(AutoStart.isEnabled());
+        if (AutoStart.available()) {
+            autoStartBox.setOnAction(event -> toggleAutoStart());
+        } else {
+            autoStartBox.setDisable(true);
+        }
+        Label hint = new Label(t(AutoStart.available() ? "label.scheduleHint" : "label.scheduleHintDev"));
+        hint.getStyleClass().add("muted");
+        return row(scheduleBox, timeBox, gap(14), autoStartBox, gap(6), hint);
     }
 
     // ---------------------------------------------------------------- layout
@@ -191,6 +381,7 @@ public class MainApp extends Application {
         Button passwordButton = lock(new Button(t("button.password")));
         passwordButton.setOnAction(event -> showPasswordDialog());
         HBox accountRow = row(accountLabel, signInButton, gap(14), encryptBox, passwordButton, spacer(), languageBox);
+        HBox scheduleRow = buildScheduleRow();
 
         Button allButton = lock(new Button(t("button.selectAll")));
         allButton.setOnAction(event -> tickVisible(row -> true));
@@ -247,7 +438,7 @@ public class MainApp extends Application {
         logArea.setPrefRowCount(9);
         logArea.setMinHeight(120);
 
-        VBox root = new VBox(8, destinationRow, accountRow, pickRow, table, runRow, logArea);
+        VBox root = new VBox(8, destinationRow, accountRow, scheduleRow, pickRow, table, runRow, logArea);
         root.setPadding(new Insets(12));
         updateCount();
         applyBusyState();
@@ -516,10 +707,18 @@ public class MainApp extends Application {
         if (busy || !saveSelection()) {
             return;
         }
+        startBackup(false, forceBox.isSelected());
+    }
+
+    /**
+     * Backs up the saved selection in the background. A scheduled run never saves what is
+     * ticked in the window: only what the user saved counts.
+     */
+    private void startBackup(boolean scheduled, boolean force) {
+        String startedOn = LocalDate.now().toString();
         stopRequested.set(false);
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         setBusy(true, true, t("state.running"));
-        boolean force = forceBox.isSelected();
         BackupLog log = new BackupLog() {
             @Override
             public void log(Level level, String line) {
@@ -534,6 +733,9 @@ public class MainApp extends Application {
         worker.submit(() -> {
             BackupService.Summary summary = service.run(force, log, stopRequested::get);
             Platform.runLater(() -> {
+                if (scheduled) {
+                    afterScheduledRun(summary, startedOn);
+                }
                 statusAfterList = t(switch (summary.exitCode()) {
                     case 0 -> "state.done";
                     case 1 -> "state.doneErrors";
@@ -811,6 +1013,9 @@ public class MainApp extends Application {
         Scene scene = stage.getScene();
         scene.setRoot(buildRoot());
         applyLanguage(scene);
+        if (tray != null) {
+            tray.show(trayLabels());
+        }
         if (!busy) {
             reloadList();
         }
