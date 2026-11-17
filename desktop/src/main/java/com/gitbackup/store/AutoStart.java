@@ -34,14 +34,40 @@ public final class AutoStart {
         }
     }
 
+    private static String command() {
+        return "\"" + launcher() + "\" --tray";
+    }
+
+    /**
+     * Points an enabled entry at the running launcher. The entry keeps the path it was
+     * written with, so after the program is installed elsewhere, or a copy it was enabled
+     * from is deleted, Windows would silently start nothing at sign-in.
+     *
+     * @return true when the entry was rewritten
+     */
+    public static boolean repair() {
+        if (!available() || !isEnabled()) {
+            return false;
+        }
+        try {
+            String current = Advapi32Util.registryGetStringValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME);
+            if (command().equalsIgnoreCase(current)) {
+                return false;
+            }
+            Advapi32Util.registrySetStringValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME, command());
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     /** @throws RuntimeException when the registry cannot be changed */
     public static void setEnabled(boolean enabled) {
         if (enabled) {
             if (!available()) {
                 throw new IllegalStateException("Start with Windows needs the installed application.");
             }
-            Advapi32Util.registrySetStringValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME,
-                    "\"" + launcher() + "\" --tray");
+            Advapi32Util.registrySetStringValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME, command());
         } else if (isEnabled()) {
             Advapi32Util.registryDeleteValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, VALUE_NAME);
         }

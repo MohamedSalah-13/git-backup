@@ -171,6 +171,9 @@ public class MainApp extends Application {
             instance = null; // cannot guard; opening a window is still better than not starting
         }
 
+        // Start with Windows may still point at a copy that was moved or deleted.
+        AutoStart.repair();
+
         Scene scene = new Scene(buildRoot(), 1080, 760);
         scene.getStylesheets().add(MainApp.class.getResource("/app.css").toExternalForm());
         stage.setScene(scene);
