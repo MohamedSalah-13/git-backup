@@ -35,6 +35,12 @@ $pom = Join-Path $root 'desktop\pom.xml'
 if (Test-Path -LiteralPath $pom) {
     Write-Host 'pre-push: building the desktop app and running its tests (about a minute)...'
     $log = Join-Path ([System.IO.Path]::GetTempPath()) 'git-backup-pre-push.log'
+    # git runs a hook with GIT_DIR and its companions set. In a linked worktree they are absolute paths,
+    # and the tests' own repositories (JGit reads the same variables) would then be this repository:
+    # their commits, branches and tags would land here. Nothing below this line needs them.
+    foreach ($name in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_PREFIX') {
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    }
     # Through cmd so Maven's warnings on stderr do not stop this script.
     & cmd /c "mvn -B -ntp -q -f `"$pom`" verify > `"$log`" 2>&1"
     if ($LASTEXITCODE -ne 0) {
