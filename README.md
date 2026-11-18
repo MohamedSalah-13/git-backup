@@ -1,8 +1,8 @@
 # نسخ مستودعات GitHub احتياطيًا إلى ZIP
 
 [![CI](https://github.com/MohamedSalah-13/git-backup/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohamedSalah-13/git-backup/actions/workflows/ci.yml)
-[![Java 21](https://img.shields.io/badge/Java-21-ED8B00?logo=openjdk&logoColor=white)](desktop/pom.xml)
-[![JavaFX 21](https://img.shields.io/badge/JavaFX-21-2C5D8F)](desktop/README.md)
+[![Java 25](https://img.shields.io/badge/Java-25-ED8B00?logo=openjdk&logoColor=white)](desktop/pom.xml)
+[![JavaFX 27](https://img.shields.io/badge/JavaFX-27-2C5D8F)](desktop/README.md)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](backup-repos.ps1)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#المتطلبات)
 [![License: All rights reserved](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)](LICENSE)

@@ -11,7 +11,7 @@
     The installer is per-user (no administrator rights), adds a Start menu entry and a
     desktop shortcut, and upgrades an older version in place.
 
-    Needs JDK 21+ (jpackage), Maven, and WiX Toolset 3.x for step 3.
+    Needs JDK 25+ (jpackage), Maven, and WiX Toolset 3.x for step 3.
 
 .EXAMPLE
     .\packaging\build-installer.ps1

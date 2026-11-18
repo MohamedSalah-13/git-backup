@@ -7,7 +7,7 @@
 
 ## المتطلبات
 
-- JDK 21 أو أحدث
+- JDK 25 أو أحدث
 - Maven 3.9 أو أحدث
 
 ## التشغيل
@@ -101,7 +101,7 @@ java -jar target\git-backup-desktop.jar --backup --force
 | `com.gitbackup.backup` | محرك النسخ (JGit) وطبقة الخدمة |
 | `com.gitbackup.github` | الاتصال بـ GitHub API وتخزين الرمز |
 | `com.gitbackup.store` | قراءة وكتابة الإعدادات وملف الحالة |
-| `com.gitbackup.ui` | نافذة JavaFX (عربي / إنجليزي) |
+| `com.gitbackup.ui` | نافذة JavaFX (عربي / إنجليزي)، سمة AtlantaFX فاتحة/داكنة، أيقونات Ikonli، ونافذة الإعدادات |
 
 ## ما لم يُنفَّذ بعد
 

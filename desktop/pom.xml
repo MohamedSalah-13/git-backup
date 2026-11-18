@@ -12,9 +12,11 @@
     <description>Desktop application that backs up GitHub repositories as ZIP files.</description>
 
     <properties>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <javafx.version>21.0.13</javafx.version>
+        <javafx.version>27.0.1</javafx.version>
+        <atlantafx.version>3.0.0</atlantafx.version>
+        <ikonli.version>12.4.0</ikonli.version>
         <jgit.version>7.7.1.202607240634-r</jgit.version>
         <jackson.version>2.19.2</jackson.version>
         <jna.version>5.17.0</jna.version>
@@ -28,6 +30,23 @@
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
             <version>${javafx.version}</version>
+        </dependency>
+        <!-- Modern flat themes (Primer light and dark) and extra controls such as Tile and ToggleSwitch. -->
+        <dependency>
+            <groupId>io.github.mkpaz</groupId>
+            <artifactId>atlantafx-base</artifactId>
+            <version>${atlantafx.version}</version>
+        </dependency>
+        <!-- Icon fonts for buttons, the table and the settings window. -->
+        <dependency>
+            <groupId>org.kordamp.ikonli</groupId>
+            <artifactId>ikonli-javafx</artifactId>
+            <version>${ikonli.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.kordamp.ikonli</groupId>
+            <artifactId>ikonli-feather-pack</artifactId>
+            <version>${ikonli.version}</version>
         </dependency>
         <dependency>
             <groupId>org.eclipse.jgit</groupId>

@@ -27,4 +27,6 @@ public class AppConfig {
     public String lastAutoRun = "";
     /** Interface language: "ar" or "en". */
     public String language = "ar";
+    /** Window theme: "system" (follows Windows), "light" or "dark". */
+    public String theme = "system";
 }
