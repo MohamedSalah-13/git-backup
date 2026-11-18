@@ -38,7 +38,7 @@
         <dependency>
             <groupId>com.github.MohamedSalah-13</groupId>
             <artifactId>desktop-updater</artifactId>
-            <version>v0.1.0</version>
+            <version>v0.2.0</version>
         </dependency>
         <dependency>
             <groupId>org.openjfx</groupId>
