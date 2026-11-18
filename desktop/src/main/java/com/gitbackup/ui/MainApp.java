@@ -10,9 +10,11 @@ import com.gitbackup.backup.PasswordRequiredException;
 import com.gitbackup.backup.RestoreService;
 import com.gitbackup.backup.RestoreService.BackupVersion;
 import com.gitbackup.backup.Schedule;
+import com.gitbackup.github.GitHubDeviceFlow;
 import com.gitbackup.github.GitHubException;
 import com.gitbackup.github.TokenStore;
 import com.gitbackup.model.AppConfig;
+import com.gitbackup.model.RepoInfo;
 import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.AutoStart;
 import com.gitbackup.store.SingleInstance;
@@ -28,6 +30,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -74,6 +77,7 @@ import javafx.scene.control.Label;
 import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
@@ -86,6 +90,8 @@ import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.image.Image;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.image.PixelReader;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
@@ -137,6 +143,10 @@ public class MainApp extends Application {
     private boolean dark;
     /** Shown in the header and in the settings window; both follow these values. */
     private final StringProperty account = new SimpleStringProperty("");
+    private final StringProperty githubAccount = new SimpleStringProperty("");
+    private final StringProperty gitlabAccount = new SimpleStringProperty("");
+    private final StringProperty bitbucketAccount = new SimpleStringProperty("");
+    private boolean multipleHosts;
     private final StringProperty destinationText = new SimpleStringProperty("");
     private final BooleanProperty busyProperty = new SimpleBooleanProperty();
     private String statusText = "";
@@ -173,7 +183,7 @@ public class MainApp extends Application {
             config = new AppConfig();
         }
         text = bundleFor(config.language);
-        account.set(t("label.account.none"));
+        clearAccounts();
         statusText = t("state.loading");
         String themeOverride = System.getProperty("gitbackup.theme"); // development aid, never saved
         dark = Themes.apply(themeOverride != null ? themeOverride : config.theme);
@@ -291,19 +301,25 @@ public class MainApp extends Application {
             showWindow();
             return;
         }
-        startBackup(false, false);
+        startBackup("tray", false);
     }
 
     // -------------------------------------------------------------- schedule
 
-    /** Called every 30 seconds: starts today's automatic backup when its time has come. */
+    /**
+     * Called every 30 seconds: starts today's automatic backup when its time has come, and
+     * otherwise the regular check of the backup files when it is due.
+     */
     private void checkSchedule() {
         long now = System.currentTimeMillis();
         if (busy || config.destination.isBlank() || now - startedAt < STARTUP_DELAY_MS || now < autoRetryAfter) {
             return;
         }
         if (Schedule.isDue(config.scheduleEnabled, config.scheduleTime, config.lastAutoRun, LocalDateTime.now())) {
-            startBackup(true, false);
+            startBackup("scheduled", false);
+        } else if (Schedule.isCheckDue(config.verifyEnabled, config.verifyEveryDays, config.lastVerify,
+                LocalDate.now())) {
+            startCheck(true);
         }
     }
 
@@ -315,9 +331,43 @@ public class MainApp extends Application {
             // For example Google Drive was not running yet: try again later, not every 30 seconds.
             autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
         }
-        if (summary.exitCode() != 0 && tray != null) {
-            tray.notify(t("app.title"), t(summary.started() ? "tray.failedSome" : "tray.failedStart"), true);
+    }
+
+    // --------------------------------------------------------- notifications
+
+    private void notifyBackup(BackupService.Summary summary, boolean background) {
+        if (!summary.started()) {
+            notifyUser(t("tray.failedStart"), true, background);
+        } else if (summary.failed() > 0) {
+            notifyUser(MessageFormat.format(t("notify.failed"), summary.failed()), true, background);
+        } else {
+            notifyUser(MessageFormat.format(t("notify.done"), summary.backedUp(), summary.unchanged()), false,
+                    background);
         }
+    }
+
+    private void notifyCheck(BackupService.CheckSummary summary, boolean background) {
+        if (!summary.started()) {
+            notifyUser(t("notify.checkNotStarted"), true, background);
+        } else if (summary.damaged() > 0) {
+            notifyUser(MessageFormat.format(t("notify.checkDamaged"), summary.damaged()), true, background);
+        } else {
+            notifyUser(MessageFormat.format(t("notify.checkOk"), summary.ok()), false, background);
+        }
+    }
+
+    /**
+     * A Windows notification next to the clock, as the settings allow. Runs the user started
+     * while looking at the window need none.
+     */
+    private void notifyUser(String message, boolean problem, boolean background) {
+        if (tray == null || "never".equals(config.notify) || ("problems".equals(config.notify) && !problem)) {
+            return;
+        }
+        if (!background && stage.isShowing() && stage.isFocused()) {
+            return;
+        }
+        tray.notify(t("app.title"), message, problem);
     }
 
     private void saveSchedule(boolean enabled, String hour, String minute) {
@@ -398,6 +448,7 @@ public class MainApp extends Application {
         statusLabel.getStyleClass().add("muted");
         HBox runRow = row(runButton, saveButton, stopButton, restoreButton, gap(6), forceBox, gap(6),
                 progressBar, statusLabel);
+        statusLabel.setMinWidth(0);
 
         String previousLog = logArea == null ? "" : logArea.getText();
         logArea = new TextArea(previousLog);
@@ -432,11 +483,25 @@ public class MainApp extends Application {
             label.getStyleClass().add("header-item");
         }
 
+        accountLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        // The full text when the window is too narrow for it.
+        for (Label label : List.of(accountLabel, destinationLabel)) {
+            javafx.scene.control.Tooltip tip = new javafx.scene.control.Tooltip();
+            tip.textProperty().bind(label.textProperty());
+            label.setTooltip(tip);
+        }
+        accountLabel.setMinWidth(120);
+        accountLabel.setMaxWidth(420);
+        destinationLabel.setPrefWidth(280);
+        destinationLabel.setMaxWidth(Double.MAX_VALUE);
+
+        Button historyButton = Icons.button(t("button.history"), Feather.LIST);
+        historyButton.setOnAction(event -> showHistory());
         Button settingsButton = Icons.button(t("button.settings"), Feather.SETTINGS);
         settingsButton.setOnAction(event -> showSettings());
 
         HBox bar = row(accountLabel, divider(), destinationLabel, divider(), scheduleChip, divider(), encryptChip,
-                spacer(), settingsButton);
+                spacer(), historyButton, settingsButton);
         bar.setSpacing(10);
         bar.getStyleClass().add("header-bar");
         return bar;
@@ -503,12 +568,80 @@ public class MainApp extends Application {
         Tile encryptTile = tile(t("check.encrypt"), t("settings.encrypt.desc"), Feather.SHIELD,
                 actions(password, encrypt));
 
-        // Account
-        Button signIn = Icons.button(t("button.signIn"), Feather.LOG_IN);
+        CheckBox issues = extraBox("extras.issues", config.backupIssues, value -> config.backupIssues = value);
+        CheckBox wiki = extraBox("extras.wiki", config.backupWiki, value -> config.backupWiki = value);
+        CheckBox releases = extraBox("extras.releases", config.backupReleases, value -> config.backupReleases = value);
+        CheckBox assets = extraBox("extras.assets", config.backupReleaseAssets,
+                value -> config.backupReleaseAssets = value);
+        assets.disableProperty().unbind();
+        assets.disableProperty().bind(busyProperty.or(releases.selectedProperty().not()));
+        GridPane extrasGrid = new GridPane();
+        extrasGrid.setHgap(14);
+        extrasGrid.setVgap(6);
+        extrasGrid.addRow(0, issues, wiki);
+        extrasGrid.addRow(1, releases, assets);
+        Tile extrasTile = tile(t("settings.extras"), t("settings.extras.desc"), Feather.PACKAGE, extrasGrid);
+
+        // Accounts
+        Button browserSignIn = Icons.button(t("button.browserSignIn"), Feather.LOG_IN);
+        browserSignIn.disableProperty().bind(busyProperty);
+        browserSignIn.setOnAction(event -> showBrowserSignIn());
+        Button signIn = Icons.button(t("button.token"), Feather.KEY);
         signIn.disableProperty().bind(busyProperty);
         signIn.setOnAction(event -> showSignIn());
-        Tile accountTile = tile(null, t("settings.account.desc"), Feather.GITHUB, signIn);
-        accountTile.titleProperty().bind(account);
+        Tile accountTile = tile(null, t("settings.account.desc"), Feather.GITHUB, actions(browserSignIn, signIn));
+        accountTile.titleProperty().bind(githubAccount);
+
+        Button gitlab = Icons.button(t("button.connect"), Feather.LINK);
+        gitlab.disableProperty().bind(busyProperty);
+        gitlab.setOnAction(event -> showHostSignIn(RepoInfo.GITLAB));
+        Tile gitlabTile = tile(null, t("settings.gitlab.desc"), Feather.GITLAB, gitlab);
+        gitlabTile.titleProperty().bind(gitlabAccount);
+
+        Button bitbucket = Icons.button(t("button.connect"), Feather.LINK);
+        bitbucket.disableProperty().bind(busyProperty);
+        bitbucket.setOnAction(event -> showHostSignIn(RepoInfo.BITBUCKET));
+        Tile bitbucketTile = tile(null, t("settings.bitbucket.desc"), Feather.BOX, bitbucket);
+        bitbucketTile.titleProperty().bind(bitbucketAccount);
+
+        ToggleSwitch orgs = new ToggleSwitch();
+        orgs.setSelected(config.includeOrgs);
+        orgs.disableProperty().bind(busyProperty);
+        orgs.selectedProperty().addListener((observable, before, after) -> {
+            config.includeOrgs = after;
+            if (saveConfig()) {
+                reloadList();
+            }
+        });
+        Tile orgsTile = tile(t("settings.orgs"), t("settings.orgs.desc"), Feather.USERS, orgs);
+
+        // Checks and notifications
+        ToggleSwitch verify = new ToggleSwitch();
+        verify.setSelected(config.verifyEnabled);
+        verify.selectedProperty().addListener((observable, before, after) -> {
+            config.verifyEnabled = after;
+            saveConfig();
+        });
+        Button checkNow = Icons.button(t("button.checkNow"), Feather.PLAY);
+        checkNow.disableProperty().bind(busyProperty);
+        checkNow.setOnAction(event -> startCheck(false));
+        String lastCheck = config.lastVerify.isBlank() ? t("settings.verify.never") : ltr(config.lastVerify);
+        Tile verifyTile = tile(t("settings.verify"),
+                MessageFormat.format(t("settings.verify.desc"), config.verifyEveryDays, lastCheck),
+                Feather.CHECK_SQUARE, actions(checkNow, verify));
+
+        ComboBox<String> notify = new ComboBox<>();
+        List<String> notifyModes = List.of("always", "problems", "never");
+        for (String mode : notifyModes) {
+            notify.getItems().add(t("notify.mode." + mode));
+        }
+        notify.getSelectionModel().select(Math.max(0, notifyModes.indexOf(config.notify)));
+        notify.setOnAction(event -> {
+            config.notify = notifyModes.get(notify.getSelectionModel().getSelectedIndex());
+            saveConfig();
+        });
+        Tile notifyTile = tile(t("settings.notify"),
+                t(tray != null ? "settings.notify.desc" : "settings.notify.noTray"), Feather.BELL, notify);
 
         // Schedule
         LocalTime time = Schedule.parseTime(config.scheduleTime);
@@ -581,9 +714,10 @@ public class MainApp extends Application {
         Tile themeTile = tile(t("settings.theme"), null, Feather.MOON, theme);
 
         VBox content = new VBox(14,
-                section(t("settings.section.backup"), folderTile, keepTile, encryptTile),
-                section(t("settings.section.account"), accountTile),
+                section(t("settings.section.backup"), folderTile, keepTile, encryptTile, extrasTile),
+                section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile),
                 section(t("settings.section.schedule"), scheduleTile, autoStartTile),
+                section(t("settings.section.checks"), verifyTile, notifyTile),
                 section(t("settings.section.appearance"), languageTile, themeTile));
         content.setPadding(new Insets(4));
         ScrollPane scroll = new ScrollPane(content);
@@ -603,6 +737,18 @@ public class MainApp extends Application {
             }
         });
         dialog.show();
+    }
+
+    /** A tick box for one kind of extra data; changes are saved at once. */
+    private CheckBox extraBox(String key, boolean value, java.util.function.Consumer<Boolean> store) {
+        CheckBox box = new CheckBox(t(key));
+        box.setSelected(value);
+        box.disableProperty().bind(busyProperty);
+        box.selectedProperty().addListener((observable, before, after) -> {
+            store.accept(after);
+            saveConfig();
+        });
+        return box;
     }
 
     private static Tile tile(String title, String description, Ikon ikon, Node action) {
@@ -656,8 +802,10 @@ public class MainApp extends Application {
         pick.setMinWidth(42);
         pick.setMaxWidth(42);
 
-        TableColumn<RepoRow, String> name = column("column.repo", 300,
-                row -> multipleOwners ? row.repo().fullName() : row.repo().name(), value -> value, null, null);
+        Function<RepoInfo, String> shownName = repo -> multipleOwners || multipleHosts ? repo.fullName() : repo.name();
+        TableColumn<RepoRow, RepoInfo> name = column("column.repo", 300, RepoRow::repo, shownName, null,
+                repo -> multipleHosts ? hostIcon(repo.host()) : null);
+        name.setComparator(Comparator.comparing(shownName, String.CASE_INSENSITIVE_ORDER));
         TableColumn<RepoRow, Boolean> type = column("column.type", 90,
                 row -> row.repo().isPrivate(), value -> t(value ? "type.private" : "type.public"), null,
                 value -> value ? Feather.LOCK : Feather.GLOBE);
@@ -719,7 +867,8 @@ public class MainApp extends Application {
                     return;
                 }
                 setText(format.apply(item));
-                setGraphic(icon == null ? null : Icons.icon(icon.apply(item), 14));
+                Ikon ikon = icon == null ? null : icon.apply(item);
+                setGraphic(ikon == null ? null : Icons.icon(ikon, 14));
                 setGraphicTextGap(6);
                 if (styleClass != null) {
                     getStyleClass().add(styleClass.apply(item));
@@ -729,7 +878,13 @@ public class MainApp extends Application {
         return column;
     }
 
+    /** A row of controls; buttons, tick boxes and chips keep their full text, labels may shorten. */
     private HBox row(Node... children) {
+        for (Node child : children) {
+            if (child instanceof javafx.scene.control.ButtonBase || child == scheduleChip || child == encryptChip) {
+                ((Region) child).setMinWidth(Region.USE_PREF_SIZE);
+            }
+        }
         HBox box = new HBox(8, children);
         box.setAlignment(Pos.CENTER_LEFT);
         return box;
@@ -773,26 +928,26 @@ public class MainApp extends Application {
         // Keep ticks the user changed but has not saved yet.
         Map<String, Boolean> previous = new HashMap<>();
         for (RepoRow row : rows) {
-            previous.put(row.repo().fullName(), row.isSelected());
+            previous.put(row.repo().key(), row.isSelected());
         }
         List<RepoRow> fresh = new ArrayList<>();
         java.util.Set<String> owners = new java.util.HashSet<>();
+        java.util.Set<String> hosts = new java.util.HashSet<>();
         for (BackupService.RepoStatus status : listing.repos()) {
             RepoRow row = new RepoRow(status);
-            Boolean ticked = previous.get(row.repo().fullName());
+            Boolean ticked = previous.get(row.repo().key());
             if (ticked != null) {
                 row.setSelected(ticked);
             }
             owners.add(row.repo().owner());
+            hosts.add(row.repo().host());
             fresh.add(row);
         }
         multipleOwners = owners.size() > 1;
+        multipleHosts = hosts.size() > 1;
         rows.setAll(fresh);
         listLoaded = true;
-
-        account.set(MessageFormat.format(
-                t(listing.tokenSource() == TokenStore.Source.SAVED_TOKEN ? "label.account.saved" : "label.account.cli"),
-                listing.login()));
+        showAccounts(listing);
 
         String state = t("state.ready");
         if (config.destination.isBlank()) {
@@ -813,7 +968,7 @@ public class MainApp extends Application {
                 || github.kind() == GitHubException.Kind.UNAUTHORIZED);
         appendLog(String.valueOf(error.getMessage()));
         if (signIn) {
-            account.set(t("label.account.none"));
+            clearAccounts();
         }
         statusAfterList = null;
         setBusy(false, false, t(signIn ? "state.signInNeeded" : "state.listFailed"));
@@ -824,7 +979,7 @@ public class MainApp extends Application {
         String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         visibleRows.setPredicate(needle.isEmpty()
                 ? null
-                : row -> row.repo().fullName().toLowerCase(Locale.ROOT).contains(needle));
+                : row -> row.repo().key().toLowerCase(Locale.ROOT).contains(needle));
     }
 
     /** Ticks or clears the rows currently shown (the search may hide some). */
@@ -896,7 +1051,7 @@ public class MainApp extends Application {
             showSettings();
             return false;
         }
-        List<String> selected = rows.stream().filter(RepoRow::isSelected).map(row -> row.repo().fullName()).toList();
+        List<String> selected = rows.stream().filter(RepoRow::isSelected).map(row -> row.repo().key()).toList();
         if (selected.isEmpty()) {
             warn(t("msg.needOne"));
             return false;
@@ -921,19 +1076,41 @@ public class MainApp extends Application {
         if (busy || !saveSelection()) {
             return;
         }
-        startBackup(false, forceBox.isSelected());
+        startBackup("manual", forceBox.isSelected());
     }
 
     /**
      * Backs up the saved selection in the background. A scheduled run never saves what is
      * ticked in the window: only what the user saved counts.
      */
-    private void startBackup(boolean scheduled, boolean force) {
+    private void startBackup(String kind, boolean force) {
+        boolean scheduled = "scheduled".equals(kind);
         String startedOn = LocalDate.now().toString();
         stopRequested.set(false);
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         setBusy(true, true, t("state.running"));
-        BackupLog log = new BackupLog() {
+        BackupLog log = windowLog();
+        worker.submit(() -> {
+            BackupService.Summary summary = service.run(force, kind, log, stopRequested::get);
+            Platform.runLater(() -> {
+                if (scheduled) {
+                    afterScheduledRun(summary, startedOn);
+                }
+                notifyBackup(summary, !"manual".equals(kind));
+                statusAfterList = t(switch (summary.exitCode()) {
+                    case 0 -> "state.done";
+                    case 1 -> "state.doneErrors";
+                    default -> "state.failed";
+                });
+                setBusy(false, false, statusAfterList);
+                reloadList();
+            });
+        });
+    }
+
+    /** Sends the lines and the progress of a background run to the window. */
+    private BackupLog windowLog() {
+        return new BackupLog() {
             @Override
             public void log(Level level, String line) {
                 Platform.runLater(() -> appendLog(line));
@@ -944,21 +1121,55 @@ public class MainApp extends Application {
                 Platform.runLater(() -> progressBar.setProgress(total == 0 ? 1 : (double) done / total));
             }
         };
+    }
+
+    /** Checks the latest backup file of every repository in the background. */
+    private void startCheck(boolean scheduled) {
+        if (busy) {
+            return;
+        }
+        if (config.destination.isBlank()) {
+            if (!scheduled) {
+                warn(t("msg.pickDestination"));
+            }
+            return;
+        }
+        stopRequested.set(false);
+        progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
+        setBusy(true, true, t("state.checking"));
+        BackupLog log = windowLog();
         worker.submit(() -> {
-            BackupService.Summary summary = service.run(force, log, stopRequested::get);
+            BackupService.CheckSummary summary =
+                    service.check(scheduled ? "scheduled-check" : "check", log, stopRequested::get);
             Platform.runLater(() -> {
-                if (scheduled) {
-                    afterScheduledRun(summary, startedOn);
+                if (summary.started() && !stopRequested.get()) {
+                    config.lastVerify = LocalDate.now().toString();
+                    saveConfig();
+                } else if (!summary.started()) {
+                    autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
                 }
-                statusAfterList = t(switch (summary.exitCode()) {
-                    case 0 -> "state.done";
-                    case 1 -> "state.doneErrors";
-                    default -> "state.failed";
-                });
-                setBusy(false, false, statusAfterList);
-                reloadList();
+                notifyCheck(summary, scheduled);
+                setBusy(false, false, t(!summary.started() ? "state.checkFailed"
+                        : summary.damaged() > 0 ? "state.checkProblems" : "state.checkDone"));
             });
         });
+    }
+
+    private void showHistory() {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        prepare(dialog, t("history.title"));
+        dialog.setResizable(true);
+        DialogPane pane = dialog.getDialogPane();
+        pane.getStyleClass().add("settings-pane");
+        pane.setContent(new HistoryView(this::t).build(service.history()));
+        ButtonType logs = new ButtonType(t("history.openLogs"), ButtonBar.ButtonData.LEFT);
+        pane.getButtonTypes().addAll(logs, new ButtonType(t("settings.close"), ButtonBar.ButtonData.CANCEL_CLOSE));
+        // Opening the log folder keeps the window open.
+        pane.lookupButton(logs).addEventFilter(javafx.event.ActionEvent.ACTION, event -> {
+            event.consume();
+            getHostServices().showDocument(service.logsDir().toUri().toString());
+        });
+        dialog.show();
     }
 
     /**
@@ -1009,8 +1220,8 @@ public class MainApp extends Application {
             versionBox.getSelectionModel().selectFirst();
         });
         RepoRow highlighted = repoTable.getSelectionModel().getSelectedItem();
-        String initial = highlighted != null && backups.containsKey(highlighted.repo().fullName())
-                ? highlighted.repo().fullName()
+        String initial = highlighted != null && backups.containsKey(highlighted.repo().key())
+                ? highlighted.repo().key()
                 : backups.keySet().iterator().next();
         repoBox.setValue(initial);
         versionBox.getItems().setAll(backups.get(initial));
@@ -1214,6 +1425,181 @@ public class MainApp extends Application {
         reloadList();
     }
 
+    /** GitLab (server, token) or Bitbucket (account e-mail, API token). */
+    private void showHostSignIn(String host) {
+        boolean gitlab = RepoInfo.GITLAB.equals(host);
+        Dialog<ButtonType> dialog = new Dialog<>();
+        prepare(dialog, MessageFormat.format(t("hostSignIn.title"), RepoInfo.hostLabel(host)));
+        dialog.setHeaderText(t(gitlab ? "gitlab.header" : "bitbucket.header"));
+        dialog.setGraphic(Icons.icon(hostIcon(host), 28));
+        TextField first = new TextField(gitlab ? config.gitlabUrl : config.bitbucketUser);
+        first.setPromptText(t(gitlab ? "gitlab.server" : "bitbucket.email"));
+        PasswordField token = new PasswordField();
+        token.setPromptText(t("hostSignIn.token"));
+        for (TextField field : List.of(first, token)) {
+            field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+            field.setPrefWidth(400);
+        }
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(14));
+        grid.addRow(0, new Label(t(gitlab ? "gitlab.server" : "bitbucket.email")), first);
+        grid.addRow(1, new Label(t("hostSignIn.token")), token);
+        dialog.getDialogPane().setContent(grid);
+        ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
+        ButtonType remove = new ButtonType(t("hostSignIn.remove"), ButtonBar.ButtonData.LEFT);
+        dialog.getDialogPane().getButtonTypes().addAll(save, remove, ButtonType.CANCEL);
+        dialog.getDialogPane().lookupButton(save).disableProperty()
+                .bind(token.textProperty().isEmpty().or(first.textProperty().isEmpty()));
+        Platform.runLater(token::requestFocus);
+
+        Optional<ButtonType> answer = dialog.showAndWait();
+        if (answer.isEmpty() || answer.get() == ButtonType.CANCEL) {
+            return;
+        }
+        try {
+            if (answer.get() == save) {
+                if (gitlab) {
+                    config.gitlabUrl = first.getText().trim();
+                } else {
+                    config.bitbucketUser = first.getText().trim();
+                }
+                saveConfig();
+                service.tokens(host).save(token.getText());
+            } else {
+                service.tokens(host).clear();
+            }
+        } catch (IOException e) {
+            appendLog("Could not update the saved sign-in: " + e.getMessage());
+        }
+        reloadList();
+    }
+
+    /**
+     * Sign-in through the browser: shows a code, opens github.com/login/device, and waits
+     * until the user approves there.
+     */
+    private void showBrowserSignIn() {
+        GitHubDeviceFlow flow = new GitHubDeviceFlow();
+        if (!flow.available()) {
+            warn(t("browser.unavailable"));
+            return;
+        }
+        AtomicBoolean cancelled = new AtomicBoolean();
+        Dialog<ButtonType> dialog = new Dialog<>();
+        prepare(dialog, t("browser.title"));
+        dialog.setHeaderText(t("browser.header"));
+        dialog.setGraphic(Icons.icon(Feather.GITHUB, 28));
+        Label code = new Label("\u2026");
+        code.getStyleClass().addAll(Styles.TITLE_1, "device-code");
+        code.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        Button copy = Icons.button(t("browser.copy"), Feather.COPY);
+        Button open = Icons.button(t("browser.open"), Feather.EXTERNAL_LINK);
+        copy.setDisable(true);
+        open.setDisable(true);
+        ProgressIndicator spinner = new ProgressIndicator();
+        spinner.setPrefSize(22, 22);
+        Label state = new Label(t("browser.starting"));
+        state.getStyleClass().add("muted");
+        state.setWrapText(true);
+        VBox content = new VBox(14, code, row(open, copy), row(spinner, state));
+        content.setPadding(new Insets(14));
+        content.setPrefWidth(460);
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CANCEL);
+        dialog.setOnHidden(event -> cancelled.set(true));
+
+        Thread waiter = new Thread(() -> {
+            try {
+                GitHubDeviceFlow.Code started = flow.start();
+                Platform.runLater(() -> {
+                    code.setText(started.userCode());
+                    copy.setDisable(false);
+                    open.setDisable(false);
+                    copy.setOnAction(event -> copyToClipboard(started.userCode()));
+                    open.setOnAction(event -> getHostServices().showDocument(started.verificationUri()));
+                    copyToClipboard(started.userCode());
+                    getHostServices().showDocument(started.verificationUri());
+                    state.setText(t("browser.waiting"));
+                });
+                String token = flow.waitForToken(started, cancelled::get);
+                if (token == null) {
+                    return;
+                }
+                service.tokens().save(token);
+                Platform.runLater(() -> {
+                    dialog.close();
+                    setStatus(t("browser.done"));
+                    reloadList();
+                });
+            } catch (IOException e) {
+                Platform.runLater(() -> {
+                    spinner.setVisible(false);
+                    state.setText(e.getMessage());
+                });
+            }
+        }, "github-sign-in");
+        waiter.setDaemon(true);
+        waiter.start();
+        dialog.showAndWait();
+    }
+
+    private static void copyToClipboard(String value) {
+        ClipboardContent content = new ClipboardContent();
+        content.putString(value);
+        Clipboard.getSystemClipboard().setContent(content);
+    }
+
+    /** Fills the account lines of the header and the settings from a fresh list. */
+    private void showAccounts(BackupService.Listing listing) {
+        clearAccounts();
+        List<String> parts = new ArrayList<>();
+        for (BackupService.AccountInfo info : listing.accounts()) {
+            String line;
+            if (RepoInfo.GITHUB.equals(info.host())) {
+                line = MessageFormat.format(t(info.source() == TokenStore.Source.SAVED_TOKEN
+                        ? "label.account.saved" : "label.account.cli"), info.login());
+            } else {
+                line = MessageFormat.format(t("host.connected"), RepoInfo.hostLabel(info.host()), info.login());
+            }
+            accountProperty(info.host()).set(line);
+            parts.add(line);
+        }
+        for (String problem : listing.problems()) {
+            appendLog(MessageFormat.format(t("msg.accountProblem"), problem));
+            for (String host : List.of(RepoInfo.GITHUB, RepoInfo.GITLAB, RepoInfo.BITBUCKET)) {
+                if (problem.startsWith(RepoInfo.hostLabel(host) + ":")) {
+                    accountProperty(host).set(MessageFormat.format(t("host.problem"), RepoInfo.hostLabel(host)));
+                }
+            }
+        }
+        account.set(parts.isEmpty() ? t("label.account.none") : String.join("   \u00B7   ", parts));
+    }
+
+    private void clearAccounts() {
+        account.set(t("label.account.none"));
+        githubAccount.set(t("label.account.none"));
+        gitlabAccount.set(MessageFormat.format(t("host.notConnected"), "GitLab"));
+        bitbucketAccount.set(MessageFormat.format(t("host.notConnected"), "Bitbucket"));
+    }
+
+    private StringProperty accountProperty(String host) {
+        return switch (host) {
+            case RepoInfo.GITLAB -> gitlabAccount;
+            case RepoInfo.BITBUCKET -> bitbucketAccount;
+            default -> githubAccount;
+        };
+    }
+
+    private static Ikon hostIcon(String host) {
+        return switch (host) {
+            case RepoInfo.GITLAB -> Feather.GITLAB;
+            case RepoInfo.BITBUCKET -> Feather.BOX;
+            default -> Feather.GITHUB;
+        };
+    }
+
     private void changeLanguage(String language) {
         if (language.equals(config.language)) {
             return;
@@ -1332,16 +1718,26 @@ public class MainApp extends Application {
             return;
         }
         // -Dgitbackup.screenshotView=settings takes the picture of the settings window instead.
-        boolean settings = "settings".equals(System.getProperty("gitbackup.screenshotView"));
+        String view = System.getProperty("gitbackup.screenshotView", "");
+        boolean settings = "settings".equals(view);
         if (settings) {
             showSettings();
+        } else if ("history".equals(view)) {
+            showHistory();
         }
         PauseTransition settle = new PauseTransition(Duration.millis(600));
         settle.setOnFinished(event -> {
             try {
-                Scene shown = settings && settingsDialog != null
-                        ? settingsDialog.getDialogPane().getScene()
-                        : stage.getScene();
+                Scene shown = stage.getScene();
+                if (settings && settingsDialog != null) {
+                    shown = settingsDialog.getDialogPane().getScene();
+                } else if ("history".equals(view)) {
+                    for (Window window : Window.getWindows()) {
+                        if (window != stage && window.getScene() != null) {
+                            shown = window.getScene();
+                        }
+                    }
+                }
                 WritableImage image = shown.snapshot(null);
                 PixelReader reader = image.getPixelReader();
                 int width = (int) image.getWidth();

@@ -118,3 +118,11 @@
 .settings-group .tile .ikonli-font-icon {
     -fx-icon-color: -color-accent-fg;
 }
+
+/* ------------------------------------------------------- browser sign-in */
+
+.device-code {
+    -fx-font-family: "Consolas";
+    -fx-font-weight: bold;
+    -fx-text-fill: -color-accent-fg;
+}

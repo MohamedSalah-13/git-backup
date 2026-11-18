@@ -1,5 +1,6 @@
 package com.gitbackup.backup;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -38,5 +39,25 @@ public final class Schedule {
             return false;
         }
         return !now.toLocalTime().isBefore(at) && !now.toLocalDate().toString().equals(lastRunDate);
+    }
+
+    /**
+     * True when the regular check of the backup files is turned on and {@code everyDays} have
+     * passed since the last completed check (or there has been none).
+     *
+     * @param lastCheckDate yyyy-MM-dd of the last completed check, or empty
+     */
+    public static boolean isCheckDue(boolean enabled, int everyDays, String lastCheckDate, LocalDate today) {
+        if (!enabled) {
+            return false;
+        }
+        if (lastCheckDate == null || lastCheckDate.isBlank()) {
+            return true;
+        }
+        try {
+            return !today.isBefore(LocalDate.parse(lastCheckDate.trim()).plusDays(Math.max(1, everyDays)));
+        } catch (DateTimeParseException e) {
+            return true;
+        }
     }
 }

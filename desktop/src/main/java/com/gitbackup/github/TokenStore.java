@@ -25,9 +25,16 @@ public final class TokenStore {
     }
 
     private final Path file;
+    private final boolean useGitHubCli;
 
     public TokenStore(Path file) {
+        this(file, true);
+    }
+
+    /** @param useGitHubCli fall back to the GitHub CLI sign-in (only for GitHub) */
+    public TokenStore(Path file, boolean useGitHubCli) {
         this.file = file;
+        this.useGitHubCli = useGitHubCli;
     }
 
     public Resolved resolve() {
@@ -35,7 +42,7 @@ public final class TokenStore {
         if (saved != null) {
             return new Resolved(saved, Source.SAVED_TOKEN);
         }
-        String cli = readFromGitHubCli();
+        String cli = useGitHubCli ? readFromGitHubCli() : null;
         if (cli != null) {
             return new Resolved(cli, Source.GITHUB_CLI);
         }
@@ -55,6 +62,10 @@ public final class TokenStore {
             Files.createDirectories(file.getParent());
         }
         Files.write(file, encrypted);
+    }
+
+    public boolean hasSaved() {
+        return readSaved() != null;
     }
 
     public void clear() throws IOException {

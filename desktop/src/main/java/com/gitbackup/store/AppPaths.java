@@ -40,6 +40,16 @@ public final class AppPaths {
         return home.resolve("token.bin");
     }
 
+    /** Saved sign-in of GitLab or Bitbucket; GitHub keeps {@link #tokenFile()}. */
+    public Path tokenFile(String host) {
+        return "github".equals(host) ? tokenFile() : home.resolve("token-" + host + ".bin");
+    }
+
+    /** The list of past runs shown in the history window. */
+    public Path historyFile() {
+        return home.resolve("history.json");
+    }
+
     public Path zipPasswordFile() {
         return home.resolve("zip-password.bin");
     }
