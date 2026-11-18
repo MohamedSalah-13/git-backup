@@ -13,6 +13,7 @@
     .\packaging\release.ps1 -DryRun       # builds, names the installer, publishes nothing
     .\packaging\release.ps1               # the tag v<version> must exist and be at HEAD
     .\packaging\release.ps1 -CreateTag    # tags HEAD first
+    .\packaging\release.ps1 -Required     # every older copy must install it; no "Skip this version"
     .\packaging\release.ps1 -VerifyOnly   # which release is an installed copy offered right now?
 #>
 param(
@@ -20,6 +21,7 @@ param(
     [switch]$SkipBuild,
     [switch]$CreateTag,
     [switch]$VerifyOnly,
+    [switch]$Required,
     [switch]$PreRelease
 )
 
