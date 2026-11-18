@@ -1,105 +1,122 @@
-# نسخ مستودعات GitHub احتياطيًا إلى ZIP
+**English** | [العربية](README.ar.md)
+
+# Git Backup
 
 [![CI](https://github.com/MohamedSalah-13/git-backup/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MohamedSalah-13/git-backup/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/MohamedSalah-13/git-backup)](https://github.com/MohamedSalah-13/git-backup/releases/latest)
 [![Java 25](https://img.shields.io/badge/Java-25-ED8B00?logo=openjdk&logoColor=white)](desktop/pom.xml)
-[![JavaFX 27](https://img.shields.io/badge/JavaFX-27-2C5D8F)](desktop/README.md)
-[![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1-5391FE?logo=powershell&logoColor=white)](backup-repos.ps1)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#المتطلبات)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#requirements)
 [![License: All rights reserved](https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/MohamedSalah-13/git-backup)](https://github.com/MohamedSalah-13/git-backup/commits/main)
 
-ينسخ مستودعات حسابك على GitHub إلى مجلد تختاره (Google Drive أو أي قرص)، كل مستودع في ملف ZIP مستقل. المستودع الذي لم يتغير منذ آخر تشغيل يُتخطى.
+Back up your GitHub, GitLab and Bitbucket repositories as ZIP files in a folder you choose (Google Drive, an external disk, any path). Each repository becomes its own ZIP, and a repository that has not changed since the last run is skipped.
 
-## المتطلبات
+Git Backup is a Windows desktop program. The installer carries its own Java runtime, so you need neither Java nor Git on the computer.
 
-- Git for Windows
-- GitHub CLI مع تسجيل الدخول: `gh auth login`
+## Screenshots
 
-## الملفات
+The interface comes in English and Arabic (Arabic is laid out right to left). Switch the language in **Settings**.
 
-| الملف | الوظيفة |
+| English | العربية |
 |---|---|
-| `backup-gui.cmd` | يفتح نافذة اختيار المستودعات (نقرة مزدوجة) |
-| `backup-gui.ps1` | كود النافذة |
-| `backup-repos.ps1` | السكريبت الأساسي الذي ينفّذ النسخ |
-| `config.json` | الإعدادات |
-| `run-backup.cmd` | تشغيل النسخ مباشرة بدون نافذة |
-| `install-schedule.ps1` | إنشاء أو حذف المهمة المجدولة اليومية |
+| ![Repository list, English](docs/images/en-main.png) | ![Repository list, Arabic](docs/images/ar-main.png) |
+| ![Settings, English](docs/images/en-settings.png) | ![Settings, Arabic](docs/images/ar-settings.png) |
 
-## النافذة
+The repositories in these pictures are made up.
 
-افتح `backup-gui.cmd`:
+## Install
 
-1. اضغط **استعراض** واختر مجلد الحفظ (مثل `G:\My Drive\GitBackups`).
-2. ضع علامة بجوار المستودعات التي تريد نسخها.
-3. اضغط **نسخ المحدد الآن**. التفاصيل تظهر في أسفل النافذة.
+1. Download `GitBackup-<version>-setup.exe` from the [latest release](https://github.com/MohamedSalah-13/git-backup/releases/latest).
+2. Run it. It installs for the current user only (no administrator rights), adds a Start menu entry and a desktop shortcut, and upgrades an older version in place without touching your settings.
 
-- **حفظ الاختيار** يحفظ العلامات دون نسخ. الاختيار المحفوظ هو ما ينسخه التشغيل المجدول أيضًا.
-- إن حدّدت كل المستودعات فالمستودعات التي تنشئها لاحقًا تُنسخ تلقائيًا. إن حدّدت بعضها فقط فالجديد لا يُنسخ حتى تحدده.
-- عمود **الحالة** تقدير سريع (يقارن تاريخ آخر تعديل بتاريخ آخر نسخة). عند النسخ الفعلي يُفحص كل مستودع بدقة.
+The installer is not digitally signed yet, so Windows SmartScreen may warn about an unknown publisher. Choose **More info**, then **Run anyway**.
 
-## الإعدادات (`config.json`)
+From version 0.2.0 on, the program looks for a newer release shortly after it starts, then downloads and installs it when you agree.
 
-| الخانة | المعنى |
-|---|---|
-| `destination` | مجلد حفظ النسخ (الشرطة المائلة تُكتب مرتين: `G:\\My Drive\\GitBackups`) |
-| `keepVersions` | عدد النسخ المحفوظة لكل مستودع (الافتراضي 3) |
-| `include` | المستودعات المختارة. فارغة = كل المستودعات. تملؤها النافذة |
-| `owners` | فارغة = حسابك. أضف أسماء منظمات أو حسابات أخرى عند الحاجة |
-| `exclude` | مستودعات لا تظهر ولا تُنسخ أبدًا، وتقبل `*` مثل `test-*` |
-| `includeForks` | إظهار ونسخ الـ forks أيضًا |
-| `includeArchived` | إظهار ونسخ المستودعات المؤرشفة |
-| `workDir` | مجلد العمل المحلي (نسخ مؤقتة وسجلات). فارغ = مجلد `work` بجانب السكريبت |
-| `keepMirrors` | الاحتفاظ بنسخة محلية لتسريع التحديثات التالية |
+## Features
 
-## التشغيل بدون نافذة
+- **Repository list** with the state of each backup: up to date, update available, not backed up yet, or backup file missing.
+- **Three hosts:** GitHub, GitLab (gitlab.com or your company server) and Bitbucket Cloud, in one list. Organisations, groups and workspaces can be included.
+- **Full backups:** each ZIP holds the files of the default branch and the complete history (every commit, branch and tag) as a git bundle.
+- **Extras (GitHub):** issues and pull requests with their comments, the wiki, and the release list with optional release files.
+- **Restore:** bring back a whole repository or only its files.
+- **Encryption (optional):** AES-256 password protection that 7-Zip and WinRAR can open.
+- **Automatic daily backup** at a time you choose, with the program running from the system tray, optionally started with Windows.
+- **Backup checks:** the latest ZIP of every repository is verified regularly (all entries readable, history intact), and damaged files are reported.
+- **Notifications and history** of past runs.
+- **Safe sign-in:** browser sign-in or a personal access token, stored encrypted with Windows DPAPI so only your Windows user on this computer can read it.
+
+## Requirements
+
+- Windows.
+- An account on GitHub, GitLab or Bitbucket.
+
+## Using it
+
+1. Open **Settings** and choose the backup folder, for example `G:\My Drive\GitBackups`.
+2. Under **Accounts**, sign in to GitHub with your browser (or paste a token), and connect GitLab or Bitbucket if you use them.
+3. Tick the repositories to back up and press **Back up selected now**.
+4. **Save selection** keeps the ticks. The saved selection is also what the daily backup uses.
+
+If you select every repository, repositories you create later are backed up automatically. If you select only some, new ones wait until you tick them.
+
+### Without a window
 
 ```powershell
-.\backup-repos.ps1                      # نسخ ما تغيّر من المستودعات المختارة
-.\backup-repos.ps1 -DryRun              # عرض ما سيُنسخ دون تنفيذ
-.\backup-repos.ps1 -Only sunbula        # مستودع محدد هذه المرة (يقبل * وأكثر من اسم بفواصل)
-.\backup-repos.ps1 -Force               # إعادة النسخ حتى لو لم يتغير شيء
-.\backup-repos.ps1 -Destination H:\Backups   # وجهة مختلفة لهذه المرة
+java -jar git-backup-desktop.jar --backup          # back up the saved selection
+java -jar git-backup-desktop.jar --backup --force  # even if nothing changed
+java -jar git-backup-desktop.jar --check           # verify the latest ZIP of every repository
 ```
 
-## التحديث التلقائي
+Exit code: `0` success, `1` some repositories failed (or damaged backups were found), `2` could not start.
 
-```powershell
-.\install-schedule.ps1 -At 21:00    # تشغيل يومي الساعة 9 مساءً
-.\install-schedule.ps1 -Remove      # إلغاء الجدولة
-```
-
-المهمة تعمل وأنت مسجّل الدخول إلى Windows فقط، وإن كان الجهاز مغلقًا وقت الموعد تعمل عند أول فرصة. إن كانت الوجهة على Google Drive فيجب أن يكون شغّالًا وقتها، وإلا يُسجَّل خطأ ولا يُنسخ شيء.
-
-## شكل النسخ
+### What the backup folder looks like
 
 ```
 GitBackups\
-  backup-state.json                      <- حالة آخر نسخة لكل مستودع (لا تحذفه)
-  <الحساب>\<المستودع>\
-    <المستودع>_2026-11-16_213000_a1b2c3d.zip
+  backup-state.json                      <- state of the last backup of each repository (keep it)
+  <owner>\<repository>\
+    <repository>_2026-11-16_213000_a1b2c3d.zip
+  gitlab\<group>\<repository>\...
+  bitbucket\<workspace>\<repository>\...
 ```
 
-داخل كل ZIP:
+Inside each ZIP:
 
-- `source\` ملفات الفرع الرئيسي وقت النسخ.
-- `<المستودع>.bundle` التاريخ الكامل: كل الـ commits والفروع والـ tags.
-- `RESTORE.txt` خطوات الاستعادة.
+- `source\` the files of the default branch at backup time.
+- `<repository>.bundle` the full history: all commits, branches and tags.
+- `RESTORE.txt` the steps to restore.
 
-## الاستعادة
+To restore by hand: `git clone repository.bundle repository`.
+
+### Not included
+
+- Git LFS file contents (only the pointers are saved).
+- Issues, pull requests, the wiki and releases, unless you turn the matching extras on (GitHub only).
+- A repository deleted from the account: its earlier backups stay as they are.
+
+## Build from source
+
+Needs JDK 25 or later and Maven 3.9 or later.
 
 ```powershell
-git clone sunbula.bundle sunbula
+cd desktop
+mvn package
+java -jar target\git-backup-desktop.jar
 ```
 
-## ما لا تشمله النسخة
+Build the Windows installer (needs the WiX Toolset 3.x):
 
-- Issues و Pull Requests و Wiki و Releases (ليست جزءًا من مستودع git).
-- ملفات Git LFS الفعلية (تُحفظ مؤشراتها فقط).
-- المستودع المحذوف من الحساب أو الذي أُزيلت علامته: تبقى نسخه السابقة كما هي.
+```powershell
+cd desktop
+.\packaging\build-installer.ps1
+```
 
-السجلات في `work\logs`.
+More about the desktop program is in [desktop/README.md](desktop/README.md) (Arabic).
 
-## ملاحظة عند تعديل `backup-gui.ps1`
+## PowerShell scripts
 
-يجب أن يبقى محفوظًا بترميز "UTF-8 with BOM"، وإلا يظهر النص العربي في النافذة مشوّهًا.
+The repository also holds the original PowerShell version, which needs Git for Windows and the GitHub CLI (`gh auth login`) and backs up GitHub repositories only. See [README.ar.md](README.ar.md) for how to use `backup-gui.cmd`, `backup-repos.ps1` and `install-schedule.ps1`.
+
+## License
+
+All rights reserved. See [LICENSE](LICENSE).

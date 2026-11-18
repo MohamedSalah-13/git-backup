@@ -942,7 +942,7 @@ public class MainApp extends Application {
         setBusy(true, false, t("state.loading"));
         worker.submit(() -> {
             try {
-                BackupService.Listing listing = service.list();
+                BackupService.Listing listing = DemoData.enabled() ? DemoData.listing() : service.list();
                 Platform.runLater(() -> showListing(listing));
             } catch (Exception e) {
                 Platform.runLater(() -> showListFailure(e));
