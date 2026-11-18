@@ -12,6 +12,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import net.lingala.zip4j.ZipFile;
 import net.lingala.zip4j.exception.ZipException;
 import net.lingala.zip4j.model.FileHeader;
@@ -96,10 +98,18 @@ public final class BackupVerifier {
         return new int[] {ok, damaged, skipped};
     }
 
+    /** name_yyyy-MM-dd_HHmmss_head.zip, as the backup engine names its files. */
+    private static final Pattern ZIP_NAME =
+            Pattern.compile("^(.+)_\\d{4}-\\d{2}-\\d{2}_\\d{6}_[0-9a-f]{7,40}\\.zip$");
+
     /** Reads one ZIP completely. Returns the number of entries. */
     public int verifyOne(Path zipFile, char[] password) throws Exception {
         paths.createDirectories();
         int entries = 0;
+        // The repository's own history is "<name>.bundle"; a wiki adds "<name>.wiki.bundle".
+        // Matching the exact name keeps a repository called "docs.wiki" from looking like a wiki.
+        Matcher name = ZIP_NAME.matcher(zipFile.getFileName().toString());
+        String historyName = name.matches() ? name.group(1) + ".bundle" : null;
         try (ZipFile zip = new ZipFile(zipFile.toFile())) {
             if (zip.isEncrypted()) {
                 if (password == null) {
@@ -119,7 +129,9 @@ public final class BackupVerifier {
                 entries++;
                 if (header.getFileName().endsWith(".bundle")) {
                     checkBundle(zip, header);
-                    history |= !header.getFileName().endsWith(".wiki.bundle");
+                    history |= historyName == null
+                            ? !header.getFileName().endsWith(".wiki.bundle")
+                            : header.getFileName().equals(historyName);
                     continue;
                 }
                 try (InputStream in = zip.getInputStream(header)) {

@@ -11,7 +11,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Issues (with pull requests and comments) and releases of a GitHub repository, saved as
@@ -45,7 +48,8 @@ public final class GitHubExtras implements ExtrasSource {
         }
         if (releases) {
             text.append("releases").append(releaseAssets ? "+files" : "").append(':');
-            JsonNode list = orEmptyArray(() -> client.getFirstPage(GitHubClient.repoPath(repo) + "/releases"));
+            // Every page, as collect() saves every page: a change on any of them counts.
+            JsonNode list = orEmptyArray(() -> client.getAll(GitHubClient.repoPath(repo) + "/releases"));
             for (JsonNode release : list) {
                 text.append(release.path("id").asText()).append('@').append(release.path("published_at").asText())
                         .append('#').append(release.path("name").asText()).append('/')
@@ -81,10 +85,12 @@ public final class GitHubExtras implements ExtrasSource {
             files.add(write(workDir, "releases/releases.json", all));
             int downloaded = 0;
             if (releaseAssets) {
+                Set<String> used = new HashSet<>();
                 for (JsonNode release : all) {
-                    String tag = safe(release.path("tag_name").asText("untagged-" + release.path("id").asText()));
+                    String tag = release.path("tag_name").asText("untagged");
                     for (JsonNode asset : release.path("assets")) {
-                        String name = "releases/" + tag + "/" + safe(asset.path("name").asText());
+                        String name = assetPath(used, tag, release.path("id").asText(), asset.path("name").asText(),
+                                asset.path("id").asText());
                         Path target = workDir.resolve(name);
                         client.downloadAsset(asset.path("url").asText(), target);
                         files.add(new ExtraFile(name, target));
@@ -103,6 +109,27 @@ public final class GitHubExtras implements ExtrasSource {
         ObjectWriter writer = HttpJson.mapper().writerWithDefaultPrettyPrinter();
         writer.writeValue(file.toFile(), content);
         return new ExtraFile(name, file);
+    }
+
+    /**
+     * releases/tag/file inside the ZIP. Tags or file names that differ only in characters
+     * Windows does not allow (release/1 and release_1), or only in case, would land on the
+     * same path; the release or asset id then keeps them apart.
+     *
+     * @param used paths already handed out, compared without case; updated here
+     */
+    static String assetPath(Set<String> used, String tag, String releaseId, String fileName, String assetId) {
+        String folder = safe(tag);
+        String file = safe(fileName);
+        String path = "releases/" + folder + "/" + file;
+        if (used.contains(path.toLowerCase(Locale.ROOT))) {
+            path = "releases/" + folder + "_" + releaseId + "/" + file;
+        }
+        if (used.contains(path.toLowerCase(Locale.ROOT))) {
+            path = "releases/" + folder + "_" + releaseId + "/" + assetId + "_" + file;
+        }
+        used.add(path.toLowerCase(Locale.ROOT));
+        return path;
     }
 
     /** Characters Windows does not allow in file names become "_". */

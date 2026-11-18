@@ -45,6 +45,7 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.transport.BundleWriter;
 import org.eclipse.jgit.transport.CredentialsProvider;
+import org.eclipse.jgit.errors.NoRemoteRepositoryException;
 import org.eclipse.jgit.transport.FetchConnection;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.TagOpt;
@@ -215,14 +216,34 @@ public final class BackupEngine {
         }
     }
 
-    /** The wiki's branches, or null when the repository has no wiki pages yet. */
-    private static Collection<Ref> wikiRefs(RepoInfo repo, CredentialsProvider credentials) {
+    /**
+     * The wiki's branches, or null when the wiki repository does not exist (GitHub creates it
+     * only with the first page). Any other problem, such as a timeout or a refused sign-in, is
+     * thrown, so the repository's backup fails instead of silently leaving the wiki out.
+     */
+    private static Collection<Ref> wikiRefs(RepoInfo repo, CredentialsProvider credentials) throws GitAPIException {
         try {
             return Git.lsRemoteRepository().setRemote(repo.wikiUrl()).setHeads(true).setTags(true)
                     .setCredentialsProvider(credentials).call();
-        } catch (GitAPIException | RuntimeException e) {
-            return null; // GitHub creates the wiki repository only with the first page
+        } catch (GitAPIException e) {
+            if (isMissingRepository(e)) {
+                return null;
+            }
+            throw e;
         }
+    }
+
+    /** True when git reported that the remote repository does not exist. */
+    static boolean isMissingRepository(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof NoRemoteRepositoryException) {
+                return true;
+            }
+            if (cause.getCause() == cause) {
+                break;
+            }
+        }
+        return false;
     }
 
     private List<ExtrasSource.ExtraFile> collectExtras(RepoInfo repo, Path workDir, CredentialsProvider credentials)

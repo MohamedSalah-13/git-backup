@@ -94,12 +94,6 @@ public final class GitHubClient implements HostClient {
         return all;
     }
 
-    /** The first page of a list endpoint only. */
-    public JsonNode getFirstPage(String path) throws IOException {
-        String separator = path.contains("?") ? "&" : "?";
-        return http.get(API + path + separator + "per_page=" + PAGE_SIZE);
-    }
-
     /** Downloads a release file through its API address (works for private repositories too). */
     public void downloadAsset(String apiUrl, Path target) throws IOException {
         http.download(apiUrl, "application/octet-stream", target);

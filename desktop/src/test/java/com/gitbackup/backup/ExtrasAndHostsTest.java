@@ -180,6 +180,60 @@ class ExtrasAndHostsTest {
     }
 
     @Test
+    void repositoryWithoutWikiPagesIsBackedUpWithoutAWikiBundle() throws Exception {
+        RepoInfo repo = new RepoInfo("acme", "demo", true, false, false, 1, Instant.now(), "main",
+                source.toFile().getAbsolutePath(), RepoInfo.GITHUB, false, true);
+        BackupEngine engine = new BackupEngine(paths, log);
+        engine.setExtras(null, true);
+        BackupState state = new BackupState();
+
+        assertEquals(BackupEngine.Outcome.BACKED_UP,
+                engine.backupOne(repo, destination, state, stateFile, 3, false, null).outcome(), String.join("\n", lines));
+        try (ZipFile file = new ZipFile(repo.folderIn(destination).resolve(state.repos.get("acme/demo").file).toFile())) {
+            assertEquals(null, file.getEntry("demo.wiki.bundle"));
+        }
+    }
+
+    @Test
+    void wikiLookupFailuresOtherThanAMissingRepositoryAreNotHidden() {
+        Exception missing = new org.eclipse.jgit.api.errors.TransportException("not found",
+                new org.eclipse.jgit.errors.NoRemoteRepositoryException(new org.eclipse.jgit.transport.URIish(),
+                        "Repository not found"));
+        Exception timeout = new org.eclipse.jgit.api.errors.TransportException("read timed out",
+                new java.net.SocketTimeoutException("Read timed out"));
+        Exception refused = new org.eclipse.jgit.api.errors.TransportException("not authorized",
+                new org.eclipse.jgit.errors.TransportException("not authorized"));
+        assertTrue(BackupEngine.isMissingRepository(missing));
+        assertEquals(false, BackupEngine.isMissingRepository(timeout));
+        assertEquals(false, BackupEngine.isMissingRepository(refused));
+    }
+
+    @Test
+    void repositoryWhoseNameEndsInWikiPassesTheCheck() throws Exception {
+        RepoInfo repo = new RepoInfo("acme", "docs.wiki", false, false, false, 1, Instant.now(), "main",
+                source.toFile().getAbsolutePath());
+        BackupState state = new BackupState();
+        new BackupEngine(paths, log).backupOne(repo, destination, state, stateFile, 3, false, null);
+        Path zip = repo.folderIn(destination).resolve(state.repos.get("acme/docs.wiki").file);
+
+        assertEquals(3, new BackupVerifier(paths, log).verifyOne(zip, null), String.join("\n", lines));
+    }
+
+    @Test
+    void releaseFilesWhoseNamesCollideGetSeparatePaths() {
+        java.util.Set<String> used = new java.util.HashSet<>();
+        assertEquals("releases/release_1/app.zip", GitHubExtras.assetPath(used, "release/1", "11", "app.zip", "101"));
+        assertEquals("releases/release_1_12/app.zip", GitHubExtras.assetPath(used, "release_1", "12", "app.zip", "102"));
+        // Same release, two names that only differ in characters Windows does not allow.
+        assertEquals("releases/v2/a_b.txt", GitHubExtras.assetPath(used, "v2", "13", "a:b.txt", "103"));
+        assertEquals("releases/v2_13/a_b.txt", GitHubExtras.assetPath(used, "v2", "13", "a|b.txt", "104"));
+        assertEquals("releases/v2_13/105_a_b.txt", GitHubExtras.assetPath(used, "v2", "13", "a?b.txt", "105"));
+        // Windows file names ignore case.
+        assertEquals("releases/V2_13/106_A_B.txt".toLowerCase(java.util.Locale.ROOT),
+                GitHubExtras.assetPath(used, "V2", "13", "A_B.txt", "106").toLowerCase(java.util.Locale.ROOT));
+    }
+
+    @Test
     void keysAndFoldersOfEachHost() {
         Path dest = Path.of("D:", "backup");
         assertEquals("acme/demo", RepoInfo.keyOf(RepoInfo.GITHUB, "acme/demo"));
