@@ -1,6 +1,7 @@
 package com.gitbackup.backup;
 
 import com.gitbackup.model.BackupState;
+import com.gitbackup.model.RepoInfo;
 import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.JsonStore;
 import java.io.IOException;
@@ -32,13 +33,25 @@ import org.eclipse.jgit.util.FileUtils;
  * repository that no longer exists on GitHub can still be restored.
  */
 public final class RestoreService {
-    /** One ZIP of one repository. */
-    public record BackupVersion(String owner, String name, Path zip, String date, String time, String head,
-                                long size) {
+    /**
+     * One ZIP of one repository.
+     *
+     * @param destination the backup folder the ZIP was found in
+     */
+    public record BackupVersion(String host, String owner, String name, Path zip, String date, String time,
+                                String head, long size, Path destination) {
         public String fullName() {
             return owner + "/" + name;
         }
+
+        /** owner/name on GitHub, host:owner/name elsewhere, as in backup-state.json. */
+        public String key() {
+            return RepoInfo.keyOf(host, fullName());
+        }
     }
+
+    /** GitHub keeps owner/name; GitLab groups can nest, so other hosts are searched deeper. */
+    private static final int MAX_DEPTH = 10;
 
     private static final Pattern STAMP = Pattern.compile("_(\\d{4}-\\d{2}-\\d{2})_(\\d{6})_([0-9a-f]{7,40})\\.zip$");
     private static final String SOURCE_PREFIX = "source/";
@@ -49,28 +62,64 @@ public final class RestoreService {
         this.paths = paths;
     }
 
-    /** Every backup found under {@code destination}, keyed by owner/name, newest version first. */
+    /**
+     * Every backup found under {@code destination}, keyed like backup-state.json (owner/name,
+     * or host:owner/name outside GitHub), newest version first.
+     */
     public Map<String, List<BackupVersion>> findBackups(Path destination) throws IOException {
         Map<String, List<BackupVersion>> result = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         if (!Files.isDirectory(destination)) {
             return result;
         }
-        try (DirectoryStream<Path> owners = Files.newDirectoryStream(destination, Files::isDirectory)) {
-            for (Path ownerDir : owners) {
-                try (DirectoryStream<Path> repos = Files.newDirectoryStream(ownerDir, Files::isDirectory)) {
-                    for (Path repoDir : repos) {
-                        List<BackupVersion> versions = versionsIn(ownerDir.getFileName().toString(), repoDir);
-                        if (!versions.isEmpty()) {
-                            result.put(versions.get(0).fullName(), versions);
-                        }
-                    }
-                }
-            }
-        }
+        collect(destination, destination, 0, result);
         return result;
     }
 
-    private static List<BackupVersion> versionsIn(String owner, Path repoDir) throws IOException {
+    private static void collect(Path destination, Path dir, int depth, Map<String, List<BackupVersion>> result)
+            throws IOException {
+        if (depth >= 2) {
+            List<String> parts = new ArrayList<>();
+            for (Path part : destination.relativize(dir)) {
+                parts.add(part.toString());
+            }
+            String host = null;
+            if (parts.size() == 2) {
+                host = RepoInfo.GITHUB;
+            } else if (parts.size() >= 3 && (RepoInfo.GITLAB.equals(parts.get(0))
+                    || RepoInfo.BITBUCKET.equals(parts.get(0)))) {
+                host = parts.get(0);
+                parts = parts.subList(1, parts.size());
+            }
+            if (host != null) {
+                String owner = String.join("/", parts.subList(0, parts.size() - 1));
+                List<BackupVersion> versions = versionsIn(host, owner, dir, destination);
+                if (!versions.isEmpty()) {
+                    result.put(versions.get(0).key(), versions);
+                }
+            }
+        }
+        if (depth >= MAX_DEPTH) {
+            return;
+        }
+        try (DirectoryStream<Path> children = Files.newDirectoryStream(dir, Files::isDirectory)) {
+            for (Path child : children) {
+                // GitHub stops at owner/name; only the host folders lead deeper.
+                if (depth <= 1 || isHostFolder(destination, child)) {
+                    collect(destination, child, depth + 1, result);
+                }
+            }
+        }
+    }
+
+    /** True for folders below destination/gitlab or destination/bitbucket. */
+    private static boolean isHostFolder(Path destination, Path dir) {
+        Path relative = destination.relativize(dir);
+        String first = relative.getNameCount() == 0 ? "" : relative.getName(0).toString();
+        return RepoInfo.GITLAB.equals(first) || RepoInfo.BITBUCKET.equals(first);
+    }
+
+    private static List<BackupVersion> versionsIn(String host, String owner, Path repoDir, Path destination)
+            throws IOException {
         String name = repoDir.getFileName().toString();
         List<BackupVersion> versions = new ArrayList<>();
         try (DirectoryStream<Path> files = Files.newDirectoryStream(repoDir, "*.zip")) {
@@ -78,8 +127,8 @@ public final class RestoreService {
                 String fileName = zip.getFileName().toString();
                 Matcher matcher = STAMP.matcher(fileName);
                 if (fileName.startsWith(name + "_") && matcher.find() && matcher.start() == name.length()) {
-                    versions.add(new BackupVersion(owner, name, zip, matcher.group(1), matcher.group(2),
-                            matcher.group(3), Files.size(zip)));
+                    versions.add(new BackupVersion(host, owner, name, zip, matcher.group(1), matcher.group(2),
+                            matcher.group(3), Files.size(zip), destination));
                 }
             }
         }
@@ -109,7 +158,9 @@ public final class RestoreService {
                 }
                 copyEntry(zip, entry, bundle);
             }
-            String branch = recordedBranch(version);
+            BackupState.Entry recorded = recorded(version);
+            String branch = recorded == null || recorded.branch == null || recorded.branch.isBlank()
+                    ? null : recorded.branch;
             try (Git git = Git.cloneRepository()
                     .setURI(bundle.toFile().getAbsolutePath())
                     .setDirectory(target.toFile())
@@ -126,8 +177,7 @@ public final class RestoreService {
                             .call();
                 }
                 StoredConfig config = db.getConfig();
-                config.setString("remote", "origin", "url",
-                        "https://github.com/" + version.owner() + "/" + version.name() + ".git");
+                config.setString("remote", "origin", "url", originOf(version, recorded));
                 config.save();
                 ObjectId head = db.resolve(Constants.HEAD);
                 log.ok("Restore " + version.fullName() + " : done, branch " + db.getBranch() + " @ "
@@ -215,16 +265,29 @@ public final class RestoreService {
         return target;
     }
 
-    /** The default branch noted in backup-state.json next to the backups, when there is one. */
-    private static String recordedBranch(BackupVersion version) {
+    /** What backup-state.json next to the backups says about the repository, when anything. */
+    private static BackupState.Entry recorded(BackupVersion version) {
         try {
-            Path destination = version.zip().getParent().getParent().getParent();
-            BackupState.Entry entry = JsonStore.readState(destination.resolve("backup-state.json"))
-                    .repos.get(version.fullName());
-            return entry == null || entry.branch == null || entry.branch.isBlank() ? null : entry.branch;
+            return JsonStore.readState(version.destination().resolve("backup-state.json")).repos.get(version.key());
         } catch (IOException | RuntimeException e) {
             return null;
         }
+    }
+
+    /**
+     * Where "origin" of the restored repository points. GitHub addresses are fixed; other hosts
+     * use the address recorded with the backup (a GitLab server may be the company's own).
+     */
+    static String originOf(BackupVersion version, BackupState.Entry recorded) {
+        if (!RepoInfo.GITHUB.equals(version.host()) && recorded != null && recorded.remote != null
+                && !recorded.remote.isBlank()) {
+            return recorded.remote;
+        }
+        return switch (version.host()) {
+            case RepoInfo.GITLAB -> "https://gitlab.com/" + version.fullName() + ".git";
+            case RepoInfo.BITBUCKET -> "https://bitbucket.org/" + version.fullName() + ".git";
+            default -> "https://github.com/" + version.fullName() + ".git";
+        };
     }
 
     private static void deleteQuietly(Path dir) {

@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.gitbackup.model.AppConfig;
 import com.gitbackup.model.BackupState;
+import com.gitbackup.model.RunRecord;
+import com.fasterxml.jackson.core.type.TypeReference;
+import java.util.List;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,6 +48,19 @@ public final class JsonStore {
             config.language = "ar";
         }
         config.keepVersions = Math.max(1, config.keepVersions);
+        config.verifyEveryDays = Math.max(1, config.verifyEveryDays);
+        if (config.gitlabUrl == null || config.gitlabUrl.isBlank()) {
+            config.gitlabUrl = "https://gitlab.com";
+        }
+        if (config.bitbucketUser == null) {
+            config.bitbucketUser = "";
+        }
+        if (config.notify == null || config.notify.isBlank()) {
+            config.notify = "always";
+        }
+        if (config.lastVerify == null) {
+            config.lastVerify = "";
+        }
         return config;
     }
 
@@ -67,6 +83,24 @@ public final class JsonStore {
     public static void writeState(Path file, BackupState state) throws IOException {
         state.updated = LocalDateTime.now().format(ISO_LOCAL);
         writeAtomically(file, MAPPER.writeValueAsBytes(state));
+    }
+
+    /** The run history, newest first; a missing or unreadable file is an empty history. */
+    public static List<RunRecord> readHistory(Path file) {
+        if (!Files.exists(file)) {
+            return new ArrayList<>();
+        }
+        try {
+            List<RunRecord> runs = MAPPER.readValue(Files.readAllBytes(file), new TypeReference<List<RunRecord>>() {
+            });
+            return runs == null ? new ArrayList<>() : new ArrayList<>(runs);
+        } catch (IOException | RuntimeException e) {
+            return new ArrayList<>();
+        }
+    }
+
+    public static void writeHistory(Path file, List<RunRecord> runs) throws IOException {
+        writeAtomically(file, MAPPER.writeValueAsBytes(runs));
     }
 
     private static void writeAtomically(Path file, byte[] content) throws IOException {

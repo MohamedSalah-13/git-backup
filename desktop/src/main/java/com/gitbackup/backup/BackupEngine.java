@@ -45,6 +45,7 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import org.eclipse.jgit.transport.BundleWriter;
 import org.eclipse.jgit.transport.CredentialsProvider;
+import org.eclipse.jgit.errors.NoRemoteRepositoryException;
 import org.eclipse.jgit.transport.FetchConnection;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.TagOpt;
@@ -64,7 +65,8 @@ import org.eclipse.jgit.util.FileUtils;
 public final class BackupEngine {
     public enum Outcome { BACKED_UP, UNCHANGED, EMPTY, FAILED }
 
-    public record Result(RepoInfo repo, Outcome outcome, int removedVersions) {
+    /** @param detail the new ZIP's name, or what went wrong */
+    public record Result(RepoInfo repo, Outcome outcome, int removedVersions, String detail) {
     }
 
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyy-MM-dd_HHmmss", Locale.ROOT);
@@ -75,6 +77,8 @@ public final class BackupEngine {
     private final AppPaths paths;
     private final BackupLog log;
     private char[] zipPassword;
+    private ExtrasSource extras;
+    private boolean wiki;
 
     public BackupEngine(AppPaths paths, BackupLog log) {
         this.paths = paths;
@@ -90,6 +94,15 @@ public final class BackupEngine {
         this.zipPassword = password == null || password.length == 0 ? null : password.clone();
     }
 
+    /**
+     * Also puts issues, releases ({@code extras}, may be null) and the wiki's history into the
+     * ZIP of GitHub repositories.
+     */
+    public void setExtras(ExtrasSource extras, boolean wiki) {
+        this.extras = extras;
+        this.wiki = wiki;
+    }
+
     private boolean encrypting() {
         return zipPassword != null;
     }
@@ -101,32 +114,37 @@ public final class BackupEngine {
      */
     public Result backupOne(RepoInfo repo, Path destination, BackupState state, Path stateFile,
                             int keepVersions, boolean force, CredentialsProvider credentials) {
-        String full = repo.fullName();
+        String full = repo.key();
         Path tmpZip = null;
+        Path workDir = null;
         try {
             String branch = repo.defaultBranch();
             String fingerprint = branch == null || branch.isBlank() ? null : fingerprint(repo, credentials);
             if (fingerprint == null) {
                 log.info(full + " : empty repository, nothing to back up");
-                return new Result(repo, Outcome.EMPTY, 0);
+                return new Result(repo, Outcome.EMPTY, 0, "");
             }
+            String extrasFingerprint = extrasFingerprint(repo, credentials);
 
-            Path repoDir = destination.resolve(repo.owner()).resolve(repo.name());
-            String reason = reasonToBackUp(state.repos.get(full), fingerprint, repoDir, force, encrypting());
+            Path repoDir = repo.folderIn(destination);
+            String reason = reasonToBackUp(state.repos.get(full), fingerprint, extrasFingerprint, repoDir, force,
+                    encrypting());
             if (reason == null) {
                 log.info(full + " : unchanged, skipped");
-                return new Result(repo, Outcome.UNCHANGED, 0);
+                return new Result(repo, Outcome.UNCHANGED, 0, "");
             }
 
             log.info(full + " : backing up (" + reason + ")");
             paths.createDirectories();
-            Path mirror = paths.mirrorsDir().resolve(repo.owner()).resolve(repo.name() + ".git");
+            Path mirror = mirrorOf(repo, ".git");
             syncMirror(repo, mirror, credentials);
 
             String head = headOf(mirror, branch);
             String zipName = repo.name() + "_" + LocalDateTime.now().format(STAMP) + "_" + head + ".zip";
             tmpZip = paths.tmpDir().resolve(zipName);
-            int files = buildZip(repo, mirror, tmpZip, head);
+            workDir = paths.tmpDir().resolve("extras-" + repo.name() + "-" + System.nanoTime());
+            List<ExtrasSource.ExtraFile> extraFiles = collectExtras(repo, workDir, credentials);
+            int files = buildZip(repo, mirror, tmpZip, head, extraFiles);
             long size = Files.size(tmpZip);
 
             // Copy under a temporary name so a half-written file is never mistaken for a backup.
@@ -147,6 +165,8 @@ public final class BackupEngine {
             entry.size = size;
             entry.encrypted = encrypting();
             entry.backedUp = LocalDateTime.now().format(JsonStore.ISO_LOCAL);
+            entry.extras = extrasFingerprint;
+            entry.remote = repo.cloneUrl();
             state.repos.put(full, entry);
             JsonStore.writeState(stateFile, state);
 
@@ -155,18 +175,137 @@ public final class BackupEngine {
             String extra = removed > 0 ? ", removed " + removed + " old version(s)" : "";
             log.ok(full + " : saved " + zipName + " (" + files + " files, " + formatSize(size)
                     + (encrypting() ? ", encrypted" : "") + ")" + extra);
-            return new Result(repo, Outcome.BACKED_UP, removed);
+            return new Result(repo, Outcome.BACKED_UP, removed, zipName);
         } catch (Exception e) {
             log.error(full + " : FAILED - " + describe(e));
-            return new Result(repo, Outcome.FAILED, 0);
+            return new Result(repo, Outcome.FAILED, 0, describe(e));
         } finally {
             deleteQuietly(tmpZip);
+            deleteTreeQuietly(workDir);
+        }
+    }
+
+    /** Local bare copies: mirrors/owner/name.git, and mirrors/gitlab/group/name.git outside GitHub. */
+    private Path mirrorOf(RepoInfo repo, String suffix) {
+        Path folder = repo.folderIn(paths.mirrorsDir());
+        return folder.resolveSibling(folder.getFileName() + suffix);
+    }
+
+    /** Empty when nothing besides the code is backed up; otherwise a hash of what else changes. */
+    private String extrasFingerprint(RepoInfo repo, CredentialsProvider credentials) throws Exception {
+        if (!repo.onGitHub() || (extras == null && !wiki)) {
+            return "";
+        }
+        StringBuilder text = new StringBuilder();
+        if (extras != null) {
+            text.append(extras.fingerprint(repo));
+        }
+        if (wiki && repo.hasWiki()) {
+            Collection<Ref> refs = wikiRefs(repo, credentials);
+            String wikiPrint = refs == null ? null : fingerprintOf("wiki", refs);
+            text.append("wiki:").append(wikiPrint == null ? "none" : wikiPrint).append('\n');
+        }
+        if (text.length() == 0) {
+            return "";
+        }
+        try {
+            MessageDigest sha = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(sha.digest(text.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * The wiki's branches, or null when the wiki repository does not exist (GitHub creates it
+     * only with the first page). Any other problem, such as a timeout or a refused sign-in, is
+     * thrown, so the repository's backup fails instead of silently leaving the wiki out.
+     */
+    private static Collection<Ref> wikiRefs(RepoInfo repo, CredentialsProvider credentials) throws GitAPIException {
+        try {
+            return Git.lsRemoteRepository().setRemote(repo.wikiUrl()).setHeads(true).setTags(true)
+                    .setCredentialsProvider(credentials).call();
+        } catch (GitAPIException e) {
+            if (isMissingRepository(e)) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /** True when git reported that the remote repository does not exist. */
+    static boolean isMissingRepository(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof NoRemoteRepositoryException) {
+                return true;
+            }
+            if (cause.getCause() == cause) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private List<ExtrasSource.ExtraFile> collectExtras(RepoInfo repo, Path workDir, CredentialsProvider credentials)
+            throws Exception {
+        List<ExtrasSource.ExtraFile> files = new ArrayList<>();
+        if (!repo.onGitHub()) {
+            return files;
+        }
+        if (extras != null) {
+            files.addAll(extras.collect(repo, workDir, log));
+        }
+        if (wiki && repo.hasWiki() && wikiRefs(repo, credentials) != null) {
+            Path mirror = mirrorOf(repo, ".wiki.git");
+            syncWikiMirror(repo, mirror, credentials);
+            String name = repo.name() + ".wiki.bundle";
+            Path bundle = workDir.resolve(name);
+            Files.createDirectories(workDir);
+            try (Repository db = openBare(mirror)) {
+                int refs = writeBundle(db, db.resolve(Constants.HEAD), bundle);
+                if (refs > 0) {
+                    verifyBundle(db, bundle, refs);
+                    files.add(new ExtrasSource.ExtraFile(name, bundle));
+                    log.info("  wiki: " + refs + " branch(es)");
+                }
+            }
+        }
+        return files;
+    }
+
+    /** Like {@link #syncMirror}, for the wiki, whose main branch name is not known beforehand. */
+    private void syncWikiMirror(RepoInfo repo, Path mirror, CredentialsProvider credentials) throws Exception {
+        if (!Files.exists(mirror.resolve("HEAD"))) {
+            deleteRecursively(mirror);
+            Files.createDirectories(mirror);
+            Git.init().setBare(true).setDirectory(mirror.toFile()).setInitialBranch("master").call().close();
+        }
+        try (Git git = Git.open(mirror.toFile())) {
+            git.fetch().setRemote(repo.wikiUrl()).setRefSpecs(HEADS, TAGS).setRemoveDeletedRefs(true)
+                    .setTagOpt(TagOpt.NO_TAGS).setForceUpdate(true).setCredentialsProvider(credentials).call();
+            Repository db = git.getRepository();
+            List<Ref> heads = db.getRefDatabase().getRefsByPrefix(Constants.R_HEADS);
+            String target = null;
+            for (String candidate : List.of("master", "main")) {
+                if (db.findRef(Constants.R_HEADS + candidate) != null) {
+                    target = Constants.R_HEADS + candidate;
+                    break;
+                }
+            }
+            if (target == null && !heads.isEmpty()) {
+                target = heads.get(0).getName();
+            }
+            if (target != null) {
+                RefUpdate head = db.updateRef(Constants.HEAD);
+                head.disableRefLog();
+                head.link(target);
+            }
         }
     }
 
     /** Null when the last backup is still valid, otherwise why a new one is needed. */
-    private static String reasonToBackUp(BackupState.Entry previous, String fingerprint, Path repoDir, boolean force,
-                                         boolean encrypt) throws IOException {
+    private static String reasonToBackUp(BackupState.Entry previous, String fingerprint, String extras, Path repoDir,
+                                         boolean force, boolean encrypt) throws IOException {
         if (force) {
             return "forced";
         }
@@ -174,7 +313,10 @@ public final class BackupEngine {
             return "first backup";
         }
         if (!fingerprint.equals(previous.fingerprint)) {
-            return "changed on GitHub";
+            return "changed on the server";
+        }
+        if (!extras.equals(previous.extras == null ? "" : previous.extras)) {
+            return extras.isEmpty() ? "issues, releases or wiki no longer included" : "issues, releases or wiki changed";
         }
         if (previous.encrypted != encrypt) {
             return encrypt ? "encryption was turned on" : "encryption was turned off";
@@ -278,7 +420,8 @@ public final class BackupEngine {
     }
 
     /** Builds the ZIP and checks it. Returns the number of source files in it. */
-    private int buildZip(RepoInfo repo, Path mirror, Path outZip, String head) throws Exception {
+    private int buildZip(RepoInfo repo, Path mirror, Path outZip, String head, List<ExtrasSource.ExtraFile> extraFiles)
+            throws Exception {
         String bundleName = repo.name() + ".bundle";
         Path bundle = paths.tmpDir().resolve(bundleName);
         Files.deleteIfExists(bundle);
@@ -318,11 +461,22 @@ public final class BackupEngine {
                 Files.copy(bundle, zip);
                 zip.closeEntry();
 
+                for (ExtrasSource.ExtraFile extra : extraFiles) {
+                    ZipParameters extraEntry = entry(extra.nameInZip(), System.currentTimeMillis());
+                    if (extra.nameInZip().endsWith(".bundle")) {
+                        extraEntry.setCompressionMethod(CompressionMethod.STORE);
+                        extraEntry.setEntrySize(Files.size(extra.file()));
+                    }
+                    zip.putNextEntry(extraEntry);
+                    Files.copy(extra.file(), zip);
+                    zip.closeEntry();
+                }
+
                 zip.putNextEntry(entry("RESTORE.txt", System.currentTimeMillis()));
-                zip.write(restoreNotes(repo, head).getBytes(StandardCharsets.UTF_8));
+                zip.write(restoreNotes(repo, head, extraFiles).getBytes(StandardCharsets.UTF_8));
                 zip.closeEntry();
             }
-            verifyZip(outZip, files + 2, bundleName, bundleSize);
+            verifyZip(outZip, files + 2 + extraFiles.size(), bundleName, bundleSize);
             return files;
         } finally {
             deleteQuietly(bundle);
@@ -336,9 +490,14 @@ public final class BackupEngine {
             writer.include(ref);
             count++;
         }
+        if (count == 0) {
+            return 0;
+        }
         // HEAD lets "git clone repo.bundle" check out a branch on its own. A bundle only records
         // HEAD's commit, not its branch name, so RESTORE.txt names the branch with -b.
-        writer.include(Constants.HEAD, headId);
+        if (headId != null) {
+            writer.include(Constants.HEAD, headId);
+        }
         try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(bundle))) {
             writer.writeBundle(NullProgressMonitor.INSTANCE, out);
         }
@@ -387,10 +546,29 @@ public final class BackupEngine {
         }
     }
 
-    private static String restoreNotes(RepoInfo repo, String head) {
+    private static String restoreNotes(RepoInfo repo, String head, List<ExtrasSource.ExtraFile> extraFiles) {
         String name = repo.name();
-        return String.join("\r\n",
-                "Backup of " + repo.fullName(),
+        List<String> extraLines = new ArrayList<>();
+        boolean issues = false;
+        boolean releases = false;
+        for (ExtrasSource.ExtraFile extra : extraFiles) {
+            issues |= extra.nameInZip().startsWith("issues/");
+            releases |= extra.nameInZip().startsWith("releases/");
+            if (extra.nameInZip().endsWith(".wiki.bundle")) {
+                extraLines.add("  " + extra.nameInZip());
+                extraLines.add("      Full history of the wiki: git clone " + extra.nameInZip() + " " + name + ".wiki");
+            }
+        }
+        if (issues) {
+            extraLines.add("  issues\\");
+            extraLines.add("      Issues and pull requests with their comments, as JSON from the GitHub API.");
+        }
+        if (releases) {
+            extraLines.add("  releases\\");
+            extraLines.add("      Releases (releases.json) and, when included, the files attached to them.");
+        }
+        List<String> lines = new ArrayList<>(List.of(
+                "Backup of " + RepoInfo.hostLabel(repo.host()) + " " + repo.fullName(),
                 "Created : " + LocalDateTime.now().format(HUMAN),
                 "Branch  : " + repo.defaultBranch() + " @ " + head,
                 "",
@@ -398,7 +576,9 @@ public final class BackupEngine {
                 "  source\\",
                 "      Files of the default branch at the time of the backup.",
                 "  " + name + ".bundle",
-                "      Full history: every commit, branch and tag.",
+                "      Full history: every commit, branch and tag."));
+        lines.addAll(extraLines);
+        lines.addAll(List.of(
                 "",
                 "Restore the full repository (history included)",
                 "  git clone -b " + repo.defaultBranch() + " " + name + ".bundle " + name,
@@ -407,7 +587,8 @@ public final class BackupEngine {
                 "",
                 "Restore as an exact mirror (all branches as local branches)",
                 "  git clone --mirror " + name + ".bundle " + name + ".git",
-                "");
+                ""));
+        return String.join("\r\n", lines);
     }
 
     /**
@@ -449,6 +630,17 @@ public final class BackupEngine {
 
     private static void deleteRecursively(Path dir) throws IOException {
         FileUtils.delete(dir.toFile(), FileUtils.RECURSIVE | FileUtils.RETRY | FileUtils.SKIP_MISSING);
+    }
+
+    private static void deleteTreeQuietly(Path dir) {
+        if (dir == null) {
+            return;
+        }
+        try {
+            deleteRecursively(dir);
+        } catch (IOException ignored) {
+            // Cleaned up on a later run.
+        }
     }
 
     private static void deleteQuietly(Path file) {

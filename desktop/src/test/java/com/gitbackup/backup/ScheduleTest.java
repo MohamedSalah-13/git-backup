@@ -43,4 +43,14 @@ class ScheduleTest {
         assertNull(Schedule.parseTime("9"));
         assertNull(Schedule.parseTime("abc"));
     }
+
+    @Test
+    void checkIsDueAfterTheIntervalOrWhenItNeverRan() {
+        java.time.LocalDate today = java.time.LocalDate.of(2026, 11, 18);
+        assertTrue(Schedule.isCheckDue(true, 7, "", today));
+        assertTrue(Schedule.isCheckDue(true, 7, "2026-11-11", today));
+        assertFalse(Schedule.isCheckDue(true, 7, "2026-11-12", today));
+        assertFalse(Schedule.isCheckDue(false, 7, "", today));
+        assertTrue(Schedule.isCheckDue(true, 7, "not a date", today));
+    }
 }

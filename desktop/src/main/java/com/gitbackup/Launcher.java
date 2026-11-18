@@ -11,6 +11,7 @@ import javafx.application.Application;
  * <pre>
  *   (no arguments)       opens the window
  *   --backup [--force]   backs up the saved selection without a window (for scheduling)
+ *   --check              checks the latest backup file of every repository, without a window
  * </pre>
  */
 public final class Launcher {
@@ -18,7 +19,7 @@ public final class Launcher {
     }
 
     public static void main(String[] args) {
-        if (Arrays.asList(args).contains("--backup")) {
+        if (Arrays.asList(args).contains("--backup") || Arrays.asList(args).contains("--check")) {
             System.exit(HeadlessRunner.run(args));
         }
         Application.launch(MainApp.class, args);
