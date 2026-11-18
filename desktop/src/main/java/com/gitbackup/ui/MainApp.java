@@ -18,6 +18,9 @@ import com.gitbackup.model.RepoInfo;
 import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.AutoStart;
 import com.gitbackup.store.SingleInstance;
+import com.hamza.updater.AppUpdater;
+import com.hamza.updater.ReleaseSource;
+import com.hamza.updater.fx.UpdatePrompt;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
@@ -169,6 +172,8 @@ public class MainApp extends Application {
     private ProgressBar progressBar;
     private TextArea logArea;
     private Dialog<ButtonType> settingsDialog;
+    private AppUpdater updater;
+    private UpdatePrompt updates;
     private final List<Region> lockedWhileBusy = new ArrayList<>();
     private Button runButton;
     private Button saveButton;
@@ -252,6 +257,18 @@ public class MainApp extends Application {
         } else {
             stage.show();
             scene.getRoot().requestFocus(); // otherwise the folder field starts selected
+        }
+
+        // A newer release is announced, downloaded and installed by the shared desktop-updater library.
+        // Pre-releases count: every 0.x release of this program is published as one.
+        updater = AppUpdater.builder("Git Backup")
+                .source(ReleaseSource.github("MohamedSalah-13/git-backup").asset("*-setup.exe")
+                        .includePreReleases(true))
+                .build();
+        // Closing goes through the program's own exit, which asks before it cuts a running backup short.
+        updates = UpdatePrompt.create(updater, stage).language(config.language).onExit(this::exitApplication);
+        if (!devRun) {
+            updates.start();
         }
 
         Timeline clock = new Timeline(new KeyFrame(Duration.seconds(30), event -> checkSchedule()));
@@ -713,12 +730,21 @@ public class MainApp extends Application {
         });
         Tile themeTile = tile(t("settings.theme"), null, Feather.MOON, theme);
 
+        // Updates
+        Button checkUpdates = Icons.button(t("button.checkUpdates"), Feather.DOWNLOAD_CLOUD);
+        checkUpdates.setOnAction(event -> updates.checkNow());
+        String installed = updater.currentVersion().map(version -> ltr(version.toString()))
+                .orElse(t("settings.updates.dev"));
+        Tile updatesTile = tile(t("settings.updates"),
+                MessageFormat.format(t("settings.updates.desc"), installed), Feather.REFRESH_CW, checkUpdates);
+
         VBox content = new VBox(14,
                 section(t("settings.section.backup"), folderTile, keepTile, encryptTile, extrasTile),
                 section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile),
                 section(t("settings.section.schedule"), scheduleTile, autoStartTile),
                 section(t("settings.section.checks"), verifyTile, notifyTile),
-                section(t("settings.section.appearance"), languageTile, themeTile));
+                section(t("settings.section.appearance"), languageTile, themeTile),
+                section(t("settings.section.updates"), updatesTile));
         content.setPadding(new Insets(4));
         ScrollPane scroll = new ScrollPane(content);
         scroll.setFitToWidth(true);
@@ -1608,6 +1634,7 @@ public class MainApp extends Application {
         saveConfig();
         String oldStatus = statusText;
         text = bundleFor(language);
+        updates.language(language);
         // The status and account lines are re-read from the list in the new language.
         statusText = oldStatus;
         Scene scene = stage.getScene();

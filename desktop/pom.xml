@@ -25,7 +25,21 @@
         <main.class>com.gitbackup.Launcher</main.class>
     </properties>
 
+    <repositories>
+        <!-- Serves desktop-updater straight from its GitHub tags. -->
+        <repository>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
+        </repository>
+    </repositories>
+
     <dependencies>
+        <!-- Update check, download and install (github.com/MohamedSalah-13/desktop-updater). -->
+        <dependency>
+            <groupId>com.github.MohamedSalah-13</groupId>
+            <artifactId>desktop-updater</artifactId>
+            <version>v0.1.0</version>
+        </dependency>
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
