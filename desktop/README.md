@@ -47,6 +47,23 @@ java -jar target\git-backup-desktop.jar --check
 - المثبّت غير موقّع رقميًا، فسيعرض Windows تحذير "ناشر غير معروف" عند العميل إلى أن تُشترى شهادة توقيع.
 - لتغيير الأيقونة: عدّل `packaging\MakeIcon.java` ثم `java packaging\MakeIcon.java .`
 
+## نشر إصدار
+
+```powershell
+.\packaging\release.ps1 -DryRun       # كل شيء عدا النشر
+.\packaging\release.ps1               # الوسم v<الإصدار> يجب أن يكون موجودًا وعند HEAD
+.\packaging\release.ps1 -CreateTag    # ينشئ الوسم عند HEAD أولًا
+.\packaging\release.ps1 -VerifyOnly   # أي إصدار يُعرض الآن على النسخ المثبّتة، ولماذا
+```
+
+ينشر الإصدار المكتوب في `pom.xml` على GitHub بحيث تجده النسخ المثبّتة: يفحص المشروع (لا تعديلات غير محفوظة،
+الوسم عند HEAD، الرقم أحدث من آخر إصدار منشور)، يشغّل `build-installer.ps1`، يرفع المثبّت باسم
+`GitBackup-<الإصدار>-setup.exe` وهو الاسم الذي يبحث عنه البرنامج، ثم يقرأ الإصدار كما يقرؤه البرنامج.
+
+- العمل يقوم به `tools\publish-release.ps1` في نسخة من [desktop-updater](https://github.com/MohamedSalah-13/desktop-updater) بجوار هذا المستودع (أو في المسار `DESKTOP_UPDATER_HOME`).
+- «ما الجديد» الذي يراه العميل يُؤخذ من `docs\release-notes\v<الإصدار>.md` إن وُجد، وإلا من قائمة الـ commits.
+- النشر لا يُتراجع عنه: جرّب `-DryRun` أولًا. وإذا قال عميل إن التحديث لم يظهر فابدأ بـ `-VerifyOnly`.
+
 ## الأيقونة بجوار الساعة والنسخ التلقائي
 
 - إغلاق النافذة لا يغلق البرنامج: يبقى بجوار الساعة. القائمة هناك: فتح، نسخ الآن، خروج.
