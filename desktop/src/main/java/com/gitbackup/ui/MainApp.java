@@ -1,32 +1,34 @@
 package com.gitbackup.ui;
 
+import atlantafx.base.controls.CustomTextField;
+import atlantafx.base.controls.Tile;
+import atlantafx.base.controls.ToggleSwitch;
+import atlantafx.base.theme.Styles;
 import com.gitbackup.backup.BackupLog;
 import com.gitbackup.backup.BackupService;
 import com.gitbackup.backup.PasswordRequiredException;
 import com.gitbackup.backup.RestoreService;
 import com.gitbackup.backup.RestoreService.BackupVersion;
 import com.gitbackup.backup.Schedule;
-import com.gitbackup.store.AutoStart;
-import com.gitbackup.store.SingleInstance;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import javafx.animation.KeyFrame;
-import javafx.animation.Timeline;
-import javafx.scene.image.Image;
 import com.gitbackup.github.GitHubException;
 import com.gitbackup.github.TokenStore;
 import com.gitbackup.model.AppConfig;
 import com.gitbackup.store.AppPaths;
+import com.gitbackup.store.AutoStart;
+import com.gitbackup.store.SingleInstance;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.text.MessageFormat;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -38,11 +40,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import javafx.animation.KeyFrame;
 import javafx.animation.PauseTransition;
+import javafx.animation.Timeline;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.Observable;
+import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.ReadOnlyObjectWrapper;
+import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.property.SimpleStringProperty;
+import javafx.beans.property.StringProperty;
 import javafx.collections.FXCollections;
 import javafx.collections.ListChangeListener;
 import javafx.collections.ObservableList;
@@ -51,6 +59,7 @@ import javafx.collections.transformation.SortedList;
 import javafx.geometry.Insets;
 import javafx.geometry.NodeOrientation;
 import javafx.geometry.Pos;
+import javafx.scene.Node;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
@@ -60,10 +69,14 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
+import javafx.scene.control.DialogPane;
 import javafx.scene.control.Label;
+import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.RadioButton;
+import javafx.scene.control.ScrollPane;
+import javafx.scene.control.Separator;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
@@ -72,8 +85,10 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.image.Image;
 import javafx.scene.image.PixelReader;
 import javafx.scene.image.WritableImage;
+import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -81,9 +96,12 @@ import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
+import javafx.stage.Window;
 import javafx.util.Duration;
 import javafx.util.StringConverter;
 import javax.imageio.ImageIO;
+import org.kordamp.ikonli.Ikon;
+import org.kordamp.ikonli.feather.Feather;
 
 /** The application window: pick repositories, pick a folder, run the backup. */
 public class MainApp extends Application {
@@ -116,7 +134,11 @@ public class MainApp extends Application {
     private boolean backupRunning;
     private boolean listLoaded;
     private boolean multipleOwners;
-    private String accountText = "";
+    private boolean dark;
+    /** Shown in the header and in the settings window; both follow these values. */
+    private final StringProperty account = new SimpleStringProperty("");
+    private final StringProperty destinationText = new SimpleStringProperty("");
+    private final BooleanProperty busyProperty = new SimpleBooleanProperty();
     private String statusText = "";
     private String statusAfterList;
     private boolean devAutoRunDone;
@@ -127,22 +149,16 @@ public class MainApp extends Application {
     private long autoRetryAfter;
 
     // Controls are rebuilt when the language changes.
-    private TextField destinationField;
-    private Spinner<Integer> keepSpinner;
-    private Label accountLabel;
+    private Label scheduleChip;
+    private Label encryptChip;
     private Label countLabel;
     private Label statusLabel;
     private TextField searchField;
     private TableView<RepoRow> repoTable;
-    private CheckBox encryptBox;
-    private CheckBox scheduleBox;
-    private ComboBox<String> hourBox;
-    private ComboBox<String> minuteBox;
-    private CheckBox autoStartBox;
     private CheckBox forceBox;
     private ProgressBar progressBar;
     private TextArea logArea;
-    private ComboBox<String> languageBox;
+    private Dialog<ButtonType> settingsDialog;
     private final List<Region> lockedWhileBusy = new ArrayList<>();
     private Button runButton;
     private Button saveButton;
@@ -157,8 +173,10 @@ public class MainApp extends Application {
             config = new AppConfig();
         }
         text = bundleFor(config.language);
-        accountText = t("label.account.none");
+        account.set(t("label.account.none"));
         statusText = t("state.loading");
+        String themeOverride = System.getProperty("gitbackup.theme"); // development aid, never saved
+        dark = Themes.apply(themeOverride != null ? themeOverride : config.theme);
 
         // One window per user: a second start only brings the first one back.
         try {
@@ -175,9 +193,16 @@ public class MainApp extends Application {
         AutoStart.repair();
 
         Scene scene = new Scene(buildRoot(), 1080, 760);
-        scene.getStylesheets().add(MainApp.class.getResource("/app.css").toExternalForm());
+        scene.getStylesheets().add(css());
+        Themes.decorate(scene, dark);
         stage.setScene(scene);
         applyLanguage(scene);
+        // "Like Windows" follows a change of the Windows colour mode while the program runs.
+        Platform.getPreferences().colorSchemeProperty().addListener((observable, before, after) -> {
+            if (Themes.SYSTEM.equals(config.theme) && System.getProperty("gitbackup.theme") == null) {
+                applyTheme();
+            }
+        });
         for (String size : List.of("16", "32", "48", "256")) {
             stage.getIcons().add(new Image(MainApp.class.getResource("/icon-" + size + ".png").toExternalForm()));
         }
@@ -295,63 +320,27 @@ public class MainApp extends Application {
         }
     }
 
-    private void saveSchedule() {
-        config.scheduleEnabled = scheduleBox.isSelected();
-        config.scheduleTime = hourBox.getValue() + ":" + minuteBox.getValue();
+    private void saveSchedule(boolean enabled, String hour, String minute) {
+        config.scheduleEnabled = enabled;
+        config.scheduleTime = hour + ":" + minute;
         if (saveConfig()) {
+            refreshHeader();
             setStatus(config.scheduleEnabled
                     ? MessageFormat.format(t("state.scheduleOn"), ltr(config.scheduleTime))
                     : t("state.scheduleOff"));
         }
     }
 
-    private void toggleAutoStart() {
+    private void toggleAutoStart(ToggleSwitch toggle) {
+        if (toggle.isSelected() == AutoStart.isEnabled()) {
+            return;
+        }
         try {
-            AutoStart.setEnabled(autoStartBox.isSelected());
+            AutoStart.setEnabled(toggle.isSelected());
         } catch (RuntimeException e) {
             appendLog("Could not change start with Windows: " + e.getMessage());
-            autoStartBox.setSelected(AutoStart.isEnabled());
+            toggle.setSelected(AutoStart.isEnabled());
         }
-    }
-
-    private HBox buildScheduleRow() {
-        scheduleBox = new CheckBox(t("check.schedule"));
-        scheduleBox.setSelected(config.scheduleEnabled);
-        LocalTime time = Schedule.parseTime(config.scheduleTime);
-        if (time == null) {
-            time = LocalTime.of(21, 0);
-        }
-        hourBox = new ComboBox<>();
-        for (int hour = 0; hour < 24; hour++) {
-            hourBox.getItems().add(String.format(Locale.ROOT, "%02d", hour));
-        }
-        minuteBox = new ComboBox<>();
-        for (int minute = 0; minute < 60; minute += 5) {
-            minuteBox.getItems().add(String.format(Locale.ROOT, "%02d", minute));
-        }
-        String minute = String.format(Locale.ROOT, "%02d", time.getMinute());
-        if (!minuteBox.getItems().contains(minute)) {
-            minuteBox.getItems().add(minute);
-        }
-        hourBox.setValue(String.format(Locale.ROOT, "%02d", time.getHour()));
-        minuteBox.setValue(minute);
-        HBox timeBox = new HBox(4, hourBox, new Label(":"), minuteBox);
-        timeBox.setAlignment(Pos.CENTER_LEFT);
-        timeBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
-        scheduleBox.setOnAction(event -> saveSchedule());
-        hourBox.setOnAction(event -> saveSchedule());
-        minuteBox.setOnAction(event -> saveSchedule());
-
-        autoStartBox = new CheckBox(t("check.autostart"));
-        autoStartBox.setSelected(AutoStart.isEnabled());
-        if (AutoStart.available()) {
-            autoStartBox.setOnAction(event -> toggleAutoStart());
-        } else {
-            autoStartBox.setDisable(true);
-        }
-        Label hint = new Label(t(AutoStart.available() ? "label.scheduleHint" : "label.scheduleHintDev"));
-        hint.getStyleClass().add("muted");
-        return row(scheduleBox, timeBox, gap(14), autoStartBox, gap(6), hint);
     }
 
     // ---------------------------------------------------------------- layout
@@ -359,70 +348,47 @@ public class MainApp extends Application {
     private Parent buildRoot() {
         lockedWhileBusy.clear();
 
-        Label destinationLabel = new Label(t("label.destination"));
-        destinationField = new TextField(config.destination);
-        destinationField.setEditable(false);
-        destinationField.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
-        HBox.setHgrow(destinationField, Priority.ALWAYS);
-        Button browseButton = lock(new Button(t("button.browse")));
-        browseButton.setOnAction(event -> chooseDestination());
-        Label keepLabel = new Label(t("label.keep"));
-        keepSpinner = lock(new Spinner<Integer>(1, 50, Math.min(50, Math.max(1, config.keepVersions))));
-        keepSpinner.setPrefWidth(76);
-        HBox destinationRow = row(destinationLabel, destinationField, browseButton, gap(10), keepLabel, keepSpinner);
-
-        accountLabel = new Label(accountText);
-        accountLabel.getStyleClass().add("muted");
-        Button signInButton = lock(new Button(t("button.signIn")));
-        signInButton.setOnAction(event -> showSignIn());
-        languageBox = lock(new ComboBox<String>(FXCollections.observableArrayList(LANGUAGE_NAMES)));
-        languageBox.getSelectionModel().select("en".equals(config.language) ? 1 : 0);
-        languageBox.setOnAction(event -> changeLanguage(LANGUAGES[languageBox.getSelectionModel().getSelectedIndex()]));
-        encryptBox = lock(new CheckBox(t("check.encrypt")));
-        encryptBox.setSelected(config.encrypt);
-        encryptBox.setOnAction(event -> toggleEncryption());
-        Button passwordButton = lock(new Button(t("button.password")));
-        passwordButton.setOnAction(event -> showPasswordDialog());
-        HBox accountRow = row(accountLabel, signInButton, gap(14), encryptBox, passwordButton, spacer(), languageBox);
-        HBox scheduleRow = buildScheduleRow();
-
-        Button allButton = lock(new Button(t("button.selectAll")));
+        Button allButton = lock(Icons.button(t("button.selectAll"), Feather.CHECK_SQUARE));
         allButton.setOnAction(event -> tickVisible(row -> true));
-        Button noneButton = lock(new Button(t("button.selectNone")));
+        Button noneButton = lock(Icons.button(t("button.selectNone"), Feather.SQUARE));
         noneButton.setOnAction(event -> tickVisible(row -> false));
-        Button neededButton = lock(new Button(t("button.selectNeeded")));
+        Button neededButton = lock(Icons.button(t("button.selectNeeded"), Feather.FILTER));
         neededButton.setOnAction(event -> tickVisible(row -> row.status() != BackupService.Status.CURRENT));
-        Button refreshButton = lock(new Button(t("button.refresh")));
+        Button refreshButton = lock(Icons.button(t("button.refresh"), Feather.REFRESH_CW));
         refreshButton.setOnAction(event -> reloadList());
-        searchField = new TextField();
+        CustomTextField search = new CustomTextField();
+        search.setLeft(Icons.icon(Feather.SEARCH));
+        searchField = search;
         searchField.setPromptText(t("prompt.search"));
-        searchField.setPrefWidth(230);
+        searchField.setPrefWidth(240);
         searchField.textProperty().addListener((observable, before, after) -> applySearch(after));
         countLabel = new Label();
         countLabel.getStyleClass().add("count");
-        HBox pickRow = row(allButton, noneButton, neededButton, refreshButton, searchField, spacer(), countLabel);
+        HBox pickRow = row(allButton, noneButton, neededButton, refreshButton, gap(6), searchField, spacer(),
+                countLabel);
 
         repoTable = buildTable();
         TableView<RepoRow> table = repoTable;
         VBox.setVgrow(table, Priority.ALWAYS);
 
-        runButton = lock(new Button(t("button.run")));
-        runButton.getStyleClass().add("primary");
+        runButton = lock(Icons.button(t("button.run"), Feather.PLAY));
+        runButton.getStyleClass().add(Styles.ACCENT);
         runButton.setOnAction(event -> runBackup());
-        saveButton = lock(new Button(t("button.save")));
+        saveButton = lock(Icons.button(t("button.save"), Feather.SAVE));
         saveButton.setOnAction(event -> {
             if (saveSelection()) {
                 setStatus(t("state.saved"));
             }
         });
-        stopButton = new Button(t("button.cancel"));
+        stopButton = Icons.button(t("button.cancel"), Feather.STOP_CIRCLE);
+        stopButton.getStyleClass().add(Styles.DANGER);
         stopButton.setDisable(true);
         stopButton.setOnAction(event -> {
             stopRequested.set(true);
             stopButton.setDisable(true);
             setStatus(t("state.stopping"));
         });
-        Button restoreButton = lock(new Button(t("button.restore")));
+        Button restoreButton = lock(Icons.button(t("button.restore"), Feather.ROTATE_CCW));
         restoreButton.setOnAction(event -> showRestore());
         forceBox = lock(new CheckBox(t("check.force")));
         progressBar = new ProgressBar(0);
@@ -438,19 +404,248 @@ public class MainApp extends Application {
         logArea.setEditable(false);
         logArea.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
         logArea.getStyleClass().add("log");
-        logArea.setPrefRowCount(9);
-        logArea.setMinHeight(120);
+        logArea.setPrefRowCount(8);
+        logArea.setMinHeight(110);
 
-        VBox root = new VBox(8, destinationRow, accountRow, scheduleRow, pickRow, table, runRow, logArea);
-        root.setPadding(new Insets(12));
+        VBox body = new VBox(10, pickRow, table, runRow, logArea);
+        body.setPadding(new Insets(12));
+        BorderPane root = new BorderPane(body);
+        root.setTop(buildHeader());
+        refreshHeader();
         updateCount();
         applyBusyState();
         return root;
     }
 
+    /** The bar at the top: who is signed in, where backups go, and the way into the settings. */
+    private Parent buildHeader() {
+        Label accountLabel = Icons.with(new Label(), Feather.GITHUB);
+        accountLabel.textProperty().bind(account);
+        Label destinationLabel = Icons.with(new Label(), Feather.FOLDER);
+        destinationLabel.textProperty().bind(destinationText);
+        destinationLabel.setTextOverrun(OverrunStyle.CENTER_ELLIPSIS);
+        destinationLabel.setMinWidth(80);
+        HBox.setHgrow(destinationLabel, Priority.SOMETIMES);
+        scheduleChip = Icons.with(new Label(), Feather.CLOCK);
+        encryptChip = Icons.with(new Label(), Feather.LOCK);
+        for (Label label : List.of(accountLabel, destinationLabel, scheduleChip, encryptChip)) {
+            label.getStyleClass().add("header-item");
+        }
+
+        Button settingsButton = Icons.button(t("button.settings"), Feather.SETTINGS);
+        settingsButton.setOnAction(event -> showSettings());
+
+        HBox bar = row(accountLabel, divider(), destinationLabel, divider(), scheduleChip, divider(), encryptChip,
+                spacer(), settingsButton);
+        bar.setSpacing(10);
+        bar.getStyleClass().add("header-bar");
+        return bar;
+    }
+
+    /** Re-reads the folder, the schedule and the encryption state shown in the header. */
+    private void refreshHeader() {
+        destinationText.set(config.destination.isBlank() ? t("header.noDestination") : ltr(config.destination));
+        if (scheduleChip == null) {
+            return;
+        }
+        scheduleChip.setText(config.scheduleEnabled
+                ? MessageFormat.format(t("header.scheduleOn"), ltr(config.scheduleTime))
+                : t("header.scheduleOff"));
+        encryptChip.setText(t(config.encrypt ? "header.encrypted" : "header.notEncrypted"));
+        encryptChip.setGraphic(Icons.icon(config.encrypt ? Feather.LOCK : Feather.UNLOCK));
+    }
+
+    private static Node divider() {
+        Separator separator = new Separator(javafx.geometry.Orientation.VERTICAL);
+        separator.setPrefHeight(18);
+        return separator;
+    }
+
+    // -------------------------------------------------------------- settings
+
+    /**
+     * Everything that used to fill the top of the window: folder, versions, encryption, GitHub
+     * account, schedule, language and theme. Changes take effect at once, as before.
+     */
+    private void showSettings() {
+        if (settingsDialog != null && settingsDialog.isShowing()) {
+            ((Stage) settingsDialog.getDialogPane().getScene().getWindow()).toFront();
+            return;
+        }
+        Dialog<ButtonType> dialog = new Dialog<>();
+        prepare(dialog, t("settings.title"));
+        settingsDialog = dialog;
+        dialog.setResizable(true);
+
+        // Backup
+        Button browse = Icons.button(t("button.browse"), Feather.FOLDER);
+        browse.disableProperty().bind(busyProperty);
+        browse.setOnAction(event -> chooseDestination());
+        Tile folderTile = tile(t("settings.folder"), null, Feather.HARD_DRIVE, browse);
+        folderTile.descriptionProperty().bind(destinationText);
+
+        Spinner<Integer> keep = new Spinner<>(1, 50, Math.min(50, Math.max(1, config.keepVersions)));
+        keep.setPrefWidth(90);
+        keep.disableProperty().bind(busyProperty);
+        keep.valueProperty().addListener((observable, before, after) -> {
+            config.keepVersions = after;
+            saveConfig();
+        });
+        Tile keepTile = tile(t("settings.keep"), t("settings.keep.desc"), Feather.LAYERS, keep);
+
+        ToggleSwitch encrypt = new ToggleSwitch();
+        encrypt.setSelected(config.encrypt);
+        encrypt.disableProperty().bind(busyProperty);
+        encrypt.selectedProperty().addListener((observable, before, after) -> toggleEncryption(encrypt));
+        Button password = Icons.button(t("button.password"), Feather.KEY);
+        password.disableProperty().bind(busyProperty);
+        password.setOnAction(event -> showPasswordDialog());
+        Tile encryptTile = tile(t("check.encrypt"), t("settings.encrypt.desc"), Feather.SHIELD,
+                actions(password, encrypt));
+
+        // Account
+        Button signIn = Icons.button(t("button.signIn"), Feather.LOG_IN);
+        signIn.disableProperty().bind(busyProperty);
+        signIn.setOnAction(event -> showSignIn());
+        Tile accountTile = tile(null, t("settings.account.desc"), Feather.GITHUB, signIn);
+        accountTile.titleProperty().bind(account);
+
+        // Schedule
+        LocalTime time = Schedule.parseTime(config.scheduleTime);
+        if (time == null) {
+            time = LocalTime.of(21, 0);
+        }
+        ComboBox<String> hourBox = new ComboBox<>();
+        for (int hour = 0; hour < 24; hour++) {
+            hourBox.getItems().add(String.format(Locale.ROOT, "%02d", hour));
+        }
+        ComboBox<String> minuteBox = new ComboBox<>();
+        for (int minute = 0; minute < 60; minute += 5) {
+            minuteBox.getItems().add(String.format(Locale.ROOT, "%02d", minute));
+        }
+        String minute = String.format(Locale.ROOT, "%02d", time.getMinute());
+        if (!minuteBox.getItems().contains(minute)) {
+            minuteBox.getItems().add(minute);
+        }
+        hourBox.setValue(String.format(Locale.ROOT, "%02d", time.getHour()));
+        minuteBox.setValue(minute);
+        HBox timeBox = new HBox(4, hourBox, new Label(":"), minuteBox);
+        timeBox.setAlignment(Pos.CENTER_LEFT);
+        timeBox.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
+        ToggleSwitch schedule = new ToggleSwitch();
+        schedule.setSelected(config.scheduleEnabled);
+        timeBox.disableProperty().bind(schedule.selectedProperty().not());
+        Runnable scheduleChanged = () -> saveSchedule(schedule.isSelected(), hourBox.getValue(), minuteBox.getValue());
+        schedule.selectedProperty().addListener((observable, before, after) -> scheduleChanged.run());
+        hourBox.setOnAction(event -> scheduleChanged.run());
+        minuteBox.setOnAction(event -> scheduleChanged.run());
+        Tile scheduleTile = tile(t("check.schedule"), t("label.scheduleHint"), Feather.CLOCK,
+                actions(timeBox, schedule));
+
+        ToggleSwitch autoStart = new ToggleSwitch();
+        autoStart.setSelected(AutoStart.isEnabled());
+        if (AutoStart.available()) {
+            autoStart.selectedProperty().addListener((observable, before, after) -> toggleAutoStart(autoStart));
+        } else {
+            autoStart.setDisable(true);
+        }
+        Tile autoStartTile = tile(t("check.autostart"),
+                t(AutoStart.available() ? "settings.autostart.desc" : "label.scheduleHintDev"), Feather.POWER,
+                autoStart);
+
+        // Appearance
+        ComboBox<String> language = new ComboBox<>(FXCollections.observableArrayList(LANGUAGE_NAMES));
+        language.getSelectionModel().select(Math.max(0, Arrays.asList(LANGUAGES).indexOf(config.language)));
+        language.disableProperty().bind(busyProperty);
+        language.setOnAction(event -> {
+            String chosen = LANGUAGES[language.getSelectionModel().getSelectedIndex()];
+            if (!chosen.equals(config.language)) {
+                // The settings window is rebuilt in the new language too.
+                dialog.close();
+                changeLanguage(chosen);
+                showSettings();
+            }
+        });
+        Tile languageTile = tile(t("settings.language"), null, Feather.GLOBE, language);
+
+        ComboBox<String> theme = new ComboBox<>();
+        for (String choice : Themes.CHOICES) {
+            theme.getItems().add(t("theme." + choice));
+        }
+        theme.getSelectionModel().select(Math.max(0, Arrays.asList(Themes.CHOICES).indexOf(config.theme)));
+        theme.setOnAction(event -> {
+            config.theme = Themes.CHOICES[theme.getSelectionModel().getSelectedIndex()];
+            saveConfig();
+            applyTheme();
+        });
+        Tile themeTile = tile(t("settings.theme"), null, Feather.MOON, theme);
+
+        VBox content = new VBox(14,
+                section(t("settings.section.backup"), folderTile, keepTile, encryptTile),
+                section(t("settings.section.account"), accountTile),
+                section(t("settings.section.schedule"), scheduleTile, autoStartTile),
+                section(t("settings.section.appearance"), languageTile, themeTile));
+        content.setPadding(new Insets(4));
+        ScrollPane scroll = new ScrollPane(content);
+        scroll.setFitToWidth(true);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        scroll.setPrefViewportHeight(Math.min(640, Math.max(360, stage.getHeight() - 120)));
+        scroll.getStyleClass().add("settings-scroll");
+
+        DialogPane pane = dialog.getDialogPane();
+        pane.getStyleClass().add("settings-pane");
+        pane.setPrefWidth(720);
+        pane.setContent(scroll);
+        pane.getButtonTypes().add(new ButtonType(t("settings.close"), ButtonBar.ButtonData.CANCEL_CLOSE));
+        dialog.setOnHidden(event -> {
+            if (settingsDialog == dialog) {
+                settingsDialog = null;
+            }
+        });
+        dialog.show();
+    }
+
+    private static Tile tile(String title, String description, Ikon ikon, Node action) {
+        Tile tile = new Tile(title, description);
+        tile.setGraphic(Icons.icon(ikon, 20));
+        tile.setAction(action);
+        return tile;
+    }
+
+    private static HBox actions(Node... nodes) {
+        HBox box = new HBox(10, nodes);
+        box.setAlignment(Pos.CENTER_LEFT);
+        return box;
+    }
+
+    /** A titled group of tiles with thin lines between them. */
+    private static VBox section(String title, Tile... tiles) {
+        Label header = new Label(title);
+        header.getStyleClass().addAll(Styles.TITLE_4, "settings-header");
+        VBox group = new VBox();
+        group.getStyleClass().add("settings-group");
+        for (int i = 0; i < tiles.length; i++) {
+            if (i > 0) {
+                group.getChildren().add(new Separator());
+            }
+            group.getChildren().add(tiles[i]);
+        }
+        return new VBox(8, header, group);
+    }
+
+    private void applyTheme() {
+        dark = Themes.apply(config.theme);
+        Themes.decorate(stage.getScene(), dark);
+        if (settingsDialog != null) {
+            Themes.decorate(settingsDialog.getDialogPane().getScene(), dark);
+        }
+    }
+
     private TableView<RepoRow> buildTable() {
         TableView<RepoRow> table = new TableView<>();
         table.setEditable(true);
+        table.getStyleClass().add(Styles.STRIPED);
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
 
         TableColumn<RepoRow, Boolean> pick = new TableColumn<>();
         pick.setCellValueFactory(cell -> cell.getValue().selectedProperty());
@@ -458,24 +653,34 @@ public class MainApp extends Application {
         pick.setEditable(true);
         pick.setSortable(false);
         pick.setPrefWidth(42);
+        pick.setMinWidth(42);
+        pick.setMaxWidth(42);
 
         TableColumn<RepoRow, String> name = column("column.repo", 300,
-                row -> multipleOwners ? row.repo().fullName() : row.repo().name(), value -> value, null);
-        TableColumn<RepoRow, String> type = column("column.type", 80,
-                row -> t(row.repo().isPrivate() ? "type.private" : "type.public"), value -> value, null);
+                row -> multipleOwners ? row.repo().fullName() : row.repo().name(), value -> value, null, null);
+        TableColumn<RepoRow, Boolean> type = column("column.type", 90,
+                row -> row.repo().isPrivate(), value -> t(value ? "type.private" : "type.public"), null,
+                value -> value ? Feather.LOCK : Feather.GLOBE);
         TableColumn<RepoRow, Long> size = column("column.size", 95,
-                row -> row.repo().sizeKb(), MainApp::formatSize, null);
+                row -> row.repo().sizeKb(), MainApp::formatSize, null, null);
         TableColumn<RepoRow, Instant> pushed = column("column.pushed", 175,
                 row -> row.repo().pushedAt(),
-                value -> ltr(WHEN.format(value.atZone(ZoneId.systemDefault()))), null);
+                value -> ltr(WHEN.format(value.atZone(ZoneId.systemDefault()))), null, null);
         TableColumn<RepoRow, String> lastBackup = column("column.backup", 175,
-                RepoRow::lastBackup, MainApp::formatLocalTime, null);
-        TableColumn<RepoRow, BackupService.Status> status = column("column.status", 160,
+                RepoRow::lastBackup, MainApp::formatLocalTime, null, null);
+        TableColumn<RepoRow, BackupService.Status> status = column("column.status", 170,
                 RepoRow::status, value -> t("status." + value.name()),
                 value -> switch (value) {
                     case CURRENT -> "status-current";
                     case MISSING -> "status-missing";
+                    case NEVER -> "status-never";
                     default -> "status-pending";
+                },
+                value -> switch (value) {
+                    case CURRENT -> Feather.CHECK_CIRCLE;
+                    case MISSING -> Feather.ALERT_TRIANGLE;
+                    case NEVER -> Feather.CIRCLE;
+                    default -> Feather.REFRESH_CW;
                 });
 
         table.getColumns().add(pick);
@@ -492,9 +697,13 @@ public class MainApp extends Application {
         return table;
     }
 
-    /** A read-only column whose cells show {@code format(value)} and may carry a style class. */
+    /**
+     * A read-only column whose cells show {@code format(value)}, and may carry a style class
+     * and an icon.
+     */
     private <T> TableColumn<RepoRow, T> column(String titleKey, double width, Function<RepoRow, T> value,
-                                               Function<T, String> format, Function<T, String> styleClass) {
+                                               Function<T, String> format, Function<T, String> styleClass,
+                                               Function<T, Ikon> icon) {
         TableColumn<RepoRow, T> column = new TableColumn<>(t(titleKey));
         column.setPrefWidth(width);
         column.setEditable(false);
@@ -503,12 +712,15 @@ public class MainApp extends Application {
             @Override
             protected void updateItem(T item, boolean empty) {
                 super.updateItem(item, empty);
-                getStyleClass().removeAll("status-current", "status-pending", "status-missing");
+                getStyleClass().removeAll("status-current", "status-pending", "status-missing", "status-never");
                 if (empty || item == null) {
                     setText(null);
+                    setGraphic(null);
                     return;
                 }
                 setText(format.apply(item));
+                setGraphic(icon == null ? null : Icons.icon(icon.apply(item), 14));
+                setGraphicTextGap(6);
                 if (styleClass != null) {
                     getStyleClass().add(styleClass.apply(item));
                 }
@@ -517,7 +729,7 @@ public class MainApp extends Application {
         return column;
     }
 
-    private HBox row(javafx.scene.Node... children) {
+    private HBox row(Node... children) {
         HBox box = new HBox(8, children);
         box.setAlignment(Pos.CENTER_LEFT);
         return box;
@@ -578,10 +790,9 @@ public class MainApp extends Application {
         rows.setAll(fresh);
         listLoaded = true;
 
-        accountText = MessageFormat.format(
+        account.set(MessageFormat.format(
                 t(listing.tokenSource() == TokenStore.Source.SAVED_TOKEN ? "label.account.saved" : "label.account.cli"),
-                listing.login());
-        accountLabel.setText(accountText);
+                listing.login()));
 
         String state = t("state.ready");
         if (config.destination.isBlank()) {
@@ -602,8 +813,7 @@ public class MainApp extends Application {
                 || github.kind() == GitHubException.Kind.UNAUTHORIZED);
         appendLog(String.valueOf(error.getMessage()));
         if (signIn) {
-            accountText = t("label.account.none");
-            accountLabel.setText(accountText);
+            account.set(t("label.account.none"));
         }
         statusAfterList = null;
         setBusy(false, false, t(signIn ? "state.signInNeeded" : "state.listFailed"));
@@ -639,6 +849,7 @@ public class MainApp extends Application {
 
     private void setBusy(boolean nowBusy, boolean backup, String status) {
         busy = nowBusy;
+        busyProperty.set(nowBusy);
         backupRunning = nowBusy && backup;
         setStatus(status);
         applyBusyState();
@@ -667,12 +878,12 @@ public class MainApp extends Application {
                 chooser.setInitialDirectory(current);
             }
         }
-        File chosen = chooser.showDialog(stage);
+        File chosen = chooser.showDialog(owner());
         if (chosen == null) {
             return;
         }
         config.destination = chosen.getAbsolutePath();
-        destinationField.setText(config.destination);
+        refreshHeader();
         if (saveConfig()) {
             reloadList();
         }
@@ -682,6 +893,7 @@ public class MainApp extends Application {
     private boolean saveSelection() {
         if (config.destination.isBlank()) {
             warn(t("msg.pickDestination"));
+            showSettings();
             return false;
         }
         List<String> selected = rows.stream().filter(RepoRow::isSelected).map(row -> row.repo().fullName()).toList();
@@ -692,7 +904,6 @@ public class MainApp extends Application {
         // Everything ticked is stored as an empty list, which means "all repositories",
         // so repositories created later are covered too.
         config.include = selected.size() == rows.size() ? new ArrayList<>() : new ArrayList<>(selected);
-        config.keepVersions = keepSpinner.getValue();
         return saveConfig();
     }
 
@@ -760,6 +971,7 @@ public class MainApp extends Application {
         }
         if (config.destination.isBlank()) {
             warn(t("msg.pickDestination"));
+            showSettings();
             return;
         }
         Map<String, List<BackupVersion>> backups;
@@ -815,11 +1027,11 @@ public class MainApp extends Application {
         folderField.setEditable(false);
         folderField.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
         folderField.setPrefWidth(380);
-        Button folderButton = new Button(t("button.browse"));
+        Button folderButton = Icons.button(t("button.browse"), Feather.FOLDER);
         folderButton.setOnAction(event -> {
             DirectoryChooser chooser = new DirectoryChooser();
             chooser.setTitle(t("restore.chooser"));
-            File chosen = chooser.showDialog(stage);
+            File chosen = chooser.showDialog(folderButton.getScene().getWindow());
             if (chosen != null) {
                 folderField.setText(chosen.getAbsolutePath());
             }
@@ -843,10 +1055,8 @@ public class MainApp extends Application {
         GridPane.setColumnSpan(versionBox, 2);
 
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.initOwner(stage);
-        dialog.setTitle(t("restore.title"));
+        prepare(dialog, t("restore.title"));
         dialog.setHeaderText(null);
-        dialog.getDialogPane().setNodeOrientation(orientation());
         dialog.getDialogPane().setContent(grid);
         ButtonType run = new ButtonType(t("restore.run"), ButtonBar.ButtonData.OK_DONE);
         dialog.getDialogPane().getButtonTypes().addAll(run, ButtonType.CANCEL);
@@ -894,10 +1104,9 @@ public class MainApp extends Application {
 
     private char[] askRestorePassword(boolean wrong) {
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.initOwner(stage);
-        dialog.setTitle(t("restore.title"));
+        prepare(dialog, t("restore.title"));
         dialog.setHeaderText(t(wrong ? "password.wrong" : "password.needed"));
-        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.setGraphic(Icons.icon(Feather.LOCK, 28));
         PasswordField field = new PasswordField();
         field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
         field.setPrefWidth(340);
@@ -909,13 +1118,17 @@ public class MainApp extends Application {
         return answer.isPresent() && answer.get() == ButtonType.OK ? field.getText().toCharArray() : null;
     }
 
-    private void toggleEncryption() {
-        if (encryptBox.isSelected() && !service.zipPassword().exists() && !showPasswordDialog()) {
-            encryptBox.setSelected(false);
+    private void toggleEncryption(ToggleSwitch toggle) {
+        if (toggle.isSelected() == config.encrypt) {
+            return; // the switch was put back below
+        }
+        if (toggle.isSelected() && !service.zipPassword().exists() && !showPasswordDialog()) {
+            toggle.setSelected(false);
             return;
         }
-        config.encrypt = encryptBox.isSelected();
+        config.encrypt = toggle.isSelected();
         if (saveConfig()) {
+            refreshHeader();
             setStatus(t(config.encrypt ? "state.encryptOn" : "state.encryptOff"));
         }
     }
@@ -937,10 +1150,9 @@ public class MainApp extends Application {
         content.setPadding(new Insets(14));
 
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.initOwner(stage);
-        dialog.setTitle(t("password.title"));
+        prepare(dialog, t("password.title"));
         dialog.setHeaderText(t("password.header"));
-        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.setGraphic(Icons.icon(Feather.KEY, 28));
         dialog.getDialogPane().setContent(content);
         ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
         dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
@@ -973,10 +1185,9 @@ public class MainApp extends Application {
     private void showSignIn() {
         TokenStore tokens = service.tokens();
         Dialog<ButtonType> dialog = new Dialog<>();
-        dialog.initOwner(stage);
-        dialog.setTitle(t("signIn.title"));
+        prepare(dialog, t("signIn.title"));
         dialog.setHeaderText(t("signIn.header"));
-        dialog.getDialogPane().setNodeOrientation(orientation());
+        dialog.setGraphic(Icons.icon(Feather.GITHUB, 28));
         PasswordField field = new PasswordField();
         field.setPromptText(t("signIn.prompt"));
         field.setNodeOrientation(NodeOrientation.LEFT_TO_RIGHT);
@@ -1035,25 +1246,43 @@ public class MainApp extends Application {
 
     // --------------------------------------------------------------- helpers
 
+    /** Owner, title, direction, stylesheet and frame colour shared by every dialog. */
+    private void prepare(Dialog<?> dialog, String title) {
+        dialog.initOwner(owner());
+        dialog.setTitle(title);
+        DialogPane pane = dialog.getDialogPane();
+        pane.setNodeOrientation(orientation());
+        pane.getStylesheets().add(css());
+        dialog.setOnShowing(event -> Themes.decorate(pane.getScene(), dark));
+    }
+
+    /** The settings window while it is open, so dialogs opened from it stay in front of it. */
+    private Window owner() {
+        if (settingsDialog != null && settingsDialog.isShowing()) {
+            return settingsDialog.getDialogPane().getScene().getWindow();
+        }
+        return stage;
+    }
+
+    private static String css() {
+        return MainApp.class.getResource("/app.css").toExternalForm();
+    }
+
     private void appendLog(String line) {
         logArea.appendText(line + System.lineSeparator());
     }
 
     private void warn(String message) {
         Alert alert = new Alert(Alert.AlertType.WARNING, message, ButtonType.OK);
-        alert.initOwner(stage);
+        prepare(alert, t("app.title"));
         alert.setHeaderText(null);
-        alert.setTitle(t("app.title"));
-        alert.getDialogPane().setNodeOrientation(orientation());
         alert.showAndWait();
     }
 
     private boolean confirm(String message) {
         Alert alert = new Alert(Alert.AlertType.CONFIRMATION, message, ButtonType.YES, ButtonType.NO);
-        alert.initOwner(stage);
+        prepare(alert, t("app.title"));
         alert.setHeaderText(null);
-        alert.setTitle(t("app.title"));
-        alert.getDialogPane().setNodeOrientation(orientation());
         return alert.showAndWait().filter(button -> button == ButtonType.YES).isPresent();
     }
 
@@ -1102,10 +1331,18 @@ public class MainApp extends Application {
             runBackup();
             return;
         }
+        // -Dgitbackup.screenshotView=settings takes the picture of the settings window instead.
+        boolean settings = "settings".equals(System.getProperty("gitbackup.screenshotView"));
+        if (settings) {
+            showSettings();
+        }
         PauseTransition settle = new PauseTransition(Duration.millis(600));
         settle.setOnFinished(event -> {
             try {
-                WritableImage image = stage.getScene().snapshot(null);
+                Scene shown = settings && settingsDialog != null
+                        ? settingsDialog.getDialogPane().getScene()
+                        : stage.getScene();
+                WritableImage image = shown.snapshot(null);
                 PixelReader reader = image.getPixelReader();
                 int width = (int) image.getWidth();
                 int height = (int) image.getHeight();
