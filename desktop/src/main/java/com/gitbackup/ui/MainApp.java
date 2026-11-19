@@ -278,10 +278,11 @@ public class MainApp extends Application {
         }
         updater = updaterBuilder.build();
         // Closing goes through the program's own exit, which asks before it cuts a running backup short.
-        // The release is downloaded before anybody is asked: the program sits by the clock all day, so by the
-        // time its window is opened the question is "install it?", not "wait for it?".
+        // Unless turned off in the settings, the release is downloaded before anybody is asked: the program
+        // sits by the clock all day, so by the time its window is opened the question is "install it?", not
+        // "wait for it?".
         updates = UpdatePrompt.create(updater, stage).language(config.language).onExit(this::exitApplication)
-                .downloadInBackground(true);
+                .downloadInBackground(config.downloadUpdatesAhead);
         if (!devRun) {
             updates.start();
         }
@@ -753,13 +754,24 @@ public class MainApp extends Application {
         Tile updatesTile = tile(t("settings.updates"),
                 MessageFormat.format(t("settings.updates.desc"), installed), Feather.REFRESH_CW, checkUpdates);
 
+        // Read at every look for a release, so the change counts from the next one on.
+        ToggleSwitch downloadAhead = new ToggleSwitch();
+        downloadAhead.setSelected(config.downloadUpdatesAhead);
+        downloadAhead.selectedProperty().addListener((observable, before, after) -> {
+            config.downloadUpdatesAhead = after;
+            updates.downloadInBackground(after);
+            saveConfig();
+        });
+        Tile downloadAheadTile = tile(t("settings.updates.ahead"), t("settings.updates.ahead.desc"),
+                Feather.DOWNLOAD, downloadAhead);
+
         VBox content = new VBox(14,
                 section(t("settings.section.backup"), folderTile, keepTile, encryptTile, extrasTile),
                 section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile),
                 section(t("settings.section.schedule"), scheduleTile, autoStartTile),
                 section(t("settings.section.checks"), verifyTile, notifyTile),
                 section(t("settings.section.appearance"), languageTile, themeTile),
-                section(t("settings.section.updates"), updatesTile));
+                section(t("settings.section.updates"), updatesTile, downloadAheadTile));
         content.setPadding(new Insets(4));
         ScrollPane scroll = new ScrollPane(content);
         scroll.setFitToWidth(true);
