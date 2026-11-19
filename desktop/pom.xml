@@ -6,7 +6,7 @@
 
     <groupId>com.gitbackup</groupId>
     <artifactId>git-backup-desktop</artifactId>
-    <version>0.2.2</version>
+    <version>0.2.3</version>
     <packaging>jar</packaging>
     <name>Git Backup Desktop</name>
     <description>Desktop application that backs up GitHub repositories as ZIP files.</description>
