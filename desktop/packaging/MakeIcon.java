@@ -11,20 +11,25 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import javax.imageio.ImageIO;
 
 /**
  * Draws the application icon and writes it in the formats the build needs:
- * src/main/resources/icon-{16,32,48,256}.png (window and tray) and packaging/app.ico
- * (installer and .exe). The results are committed; run this only to change the icon:
+ * src/main/resources/icon-{16,32,48,256}.png (window and tray), packaging/app.ico (Windows
+ * installer and .exe), packaging/app.png (Linux) and packaging/app.icns (macOS). The results are
+ * committed; run this only to change the icon:
  *
  * <pre>java packaging\MakeIcon.java .</pre>
  */
 public class MakeIcon {
     private static final int[] ICO_SIZES = {16, 24, 32, 48, 64, 256};
     private static final int[] PNG_SIZES = {16, 32, 48, 256};
+    /** The .icns entries that hold a PNG, with the size each one is drawn at. */
+    private static final String[] ICNS_TYPES = {"ic11", "ic12", "ic07", "ic08", "ic09", "ic10"};
+    private static final int[] ICNS_SIZES = {32, 64, 128, 256, 512, 1024};
 
     public static void main(String[] args) throws IOException {
         Path project = Path.of(args.length > 0 ? args[0] : ".").toAbsolutePath().normalize();
@@ -33,6 +38,8 @@ public class MakeIcon {
             ImageIO.write(draw(size), "png", resources.resolve("icon-" + size + ".png").toFile());
         }
         Files.write(project.resolve("packaging/app.ico"), ico());
+        Files.write(project.resolve("packaging/app.png"), png(draw(512)));
+        Files.write(project.resolve("packaging/app.icns"), icns());
         System.out.println("Icon files written under " + project);
     }
 
@@ -90,6 +97,22 @@ public class MakeIcon {
         for (byte[] image : images) {
             bytes.write(image);
         }
+        return bytes.toByteArray();
+    }
+
+    /** Apple's icon file: a big-endian header, then each size as a PNG under its four-letter type. */
+    private static byte[] icns() throws IOException {
+        ByteArrayOutputStream entries = new ByteArrayOutputStream();
+        for (int i = 0; i < ICNS_TYPES.length; i++) {
+            byte[] image = png(draw(ICNS_SIZES[i]));
+            entries.write(ICNS_TYPES[i].getBytes(StandardCharsets.US_ASCII));
+            entries.write(ByteBuffer.allocate(4).putInt(8 + image.length).array());
+            entries.write(image);
+        }
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        bytes.write("icns".getBytes(StandardCharsets.US_ASCII));
+        bytes.write(ByteBuffer.allocate(4).putInt(8 + entries.size()).array());
+        entries.writeTo(bytes);
         return bytes.toByteArray();
     }
 
