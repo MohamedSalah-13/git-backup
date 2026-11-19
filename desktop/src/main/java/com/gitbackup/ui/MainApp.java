@@ -19,6 +19,7 @@ import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.AutoStart;
 import com.gitbackup.store.SingleInstance;
 import com.hamza.updater.AppUpdater;
+import com.hamza.updater.Os;
 import com.hamza.updater.ReleaseSource;
 import com.hamza.updater.fx.UpdatePrompt;
 import java.awt.image.BufferedImage;
@@ -261,10 +262,14 @@ public class MainApp extends Application {
 
         // A newer release is announced, downloaded and installed by the shared desktop-updater library.
         // Pre-releases count: every 0.x release of this program is published as one.
-        // The release is found by its Windows installer on every system; where the library cannot run
-        // an installer (Linux, macOS) it offers the release's page, which holds the .deb and .dmg.
+        // Each system is offered its own installer, under the name build-installer.ps1 gives it; {arch} is
+        // the processor (x64, arm64). A release that has no file for this system is not offered here: the
+        // Windows installer goes up first, and the .deb and .dmg are added by the Packages workflow after.
+        // Windows installs and reopens; Linux and macOS download the file, check it and open it.
         AppUpdater.Builder updaterBuilder = AppUpdater.builder("Git Backup")
                 .source(ReleaseSource.github("MohamedSalah-13/git-backup").asset("*-setup.exe")
+                        .assetFor(Os.LINUX, "GitBackup-*-linux-{arch}.deb")
+                        .assetFor(Os.MAC, "GitBackup-*-macos-{arch}.dmg")
                         .includePreReleases(true));
         // The macOS package cannot carry a 0.x version, so the installer passes the real one (build-installer.ps1).
         String packagedVersion = System.getProperty("gitbackup.version");

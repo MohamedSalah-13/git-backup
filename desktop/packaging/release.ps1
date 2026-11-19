@@ -33,6 +33,9 @@ $release = @{
     AssetName   = 'GitBackup-{version}-setup.exe'      # must match the .asset("...") glob in MainApp
     AssetGlob   = '*-setup.exe'                        # the same text as that .asset("...") call
     BuildScript = 'packaging\build-installer.ps1'      # makes the installer in target\installer
+    # The installers the Packages workflow adds to the release afterwards (the .assetFor(...) calls in
+    # MainApp, with the processor written out). -VerifyOnly says whether a release has them.
+    OtherAssets = @('GitBackup-*-linux-x64.deb', 'GitBackup-*-macos-arm64.dmg', 'GitBackup-*-macos-x64.dmg')
 }
 # Paths are relative to the folder above this script's folder, the one that holds pom.xml.
 # --------------------------------------------------------------------------------------------------
