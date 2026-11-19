@@ -30,7 +30,7 @@ The repositories in these pictures are made up.
 
 The installer is not digitally signed yet, so Windows SmartScreen may warn about an unknown publisher. Choose **More info**, then **Run anyway**.
 
-From version 0.2.0 on, the program looks for a newer release shortly after it starts and installs it when you agree. Newer versions download the release in the background first, so that installing does not wait for a download.
+From version 0.2.0 on, the program looks for a newer release shortly after it starts and installs it when you agree. Newer versions download the release in the background first, so that installing does not wait for a download; **Settings → Updates → Download updates in the background** turns that off.
 
 ## Features
 

@@ -31,6 +31,8 @@ public class AppConfig {
     public String language = "ar";
     /** Window theme: "system" (follows Windows), "light" or "dark". */
     public String theme = "system";
+    /** Download a new release in the background before offering it, so that installing does not wait. */
+    public boolean downloadUpdatesAhead = true;
 
     /** GitHub only: put issues, pull requests and their comments into the ZIP as JSON. */
     public boolean backupIssues = false;
