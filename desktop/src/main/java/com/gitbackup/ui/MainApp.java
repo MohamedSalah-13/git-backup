@@ -266,7 +266,10 @@ public class MainApp extends Application {
                         .includePreReleases(true))
                 .build();
         // Closing goes through the program's own exit, which asks before it cuts a running backup short.
-        updates = UpdatePrompt.create(updater, stage).language(config.language).onExit(this::exitApplication);
+        // The release is downloaded before anybody is asked: the program sits by the clock all day, so by the
+        // time its window is opened the question is "install it?", not "wait for it?".
+        updates = UpdatePrompt.create(updater, stage).language(config.language).onExit(this::exitApplication)
+                .downloadInBackground(true);
         if (!devRun) {
             updates.start();
         }
