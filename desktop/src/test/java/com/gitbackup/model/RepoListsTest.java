@@ -54,10 +54,12 @@ class RepoListsTest {
         RepoLists.create(lists, "Mine", List.of("me/a"));
         RepoLists.create(lists, "Core", List.of("me/z"));
 
+        Map<String, String> renamed = new LinkedHashMap<>();
         assertTrue(RepoLists.syncGithub(lists, urls, List.of(
                 new RemoteList("Core", "https://github.com/stars/me/lists/core", List.of("me/a", "me/b")),
-                new RemoteList("Archive", "https://github.com/stars/me/lists/archive", List.of("me/c")))));
+                new RemoteList("Archive", "https://github.com/stars/me/lists/archive", List.of("me/c"))), renamed));
         assertEquals(List.of("Core", "Archive", "Mine", "Core (2)"), List.copyOf(lists.keySet()));
+        assertEquals(Map.of("Core", "Core (2)"), renamed);
         assertEquals(List.of("me/a", "me/b"), lists.get("Core"));
         assertEquals(List.of("me/z"), lists.get("Core (2)")); // the application's own list is kept
         assertEquals(List.of("Core", "Archive"), List.copyOf(urls.keySet()));
@@ -65,11 +67,12 @@ class RepoListsTest {
         // The same answer again changes nothing.
         assertFalse(RepoLists.syncGithub(lists, urls, List.of(
                 new RemoteList("Core", "https://github.com/stars/me/lists/core", List.of("me/a", "me/b")),
-                new RemoteList("Archive", "https://github.com/stars/me/lists/archive", List.of("me/c")))));
+                new RemoteList("Archive", "https://github.com/stars/me/lists/archive", List.of("me/c"))),
+                new LinkedHashMap<>()));
 
         // A list deleted or emptied on GitHub follows here.
         assertTrue(RepoLists.syncGithub(lists, urls, List.of(
-                new RemoteList("Core", "https://github.com/stars/me/lists/core", List.of()))));
+                new RemoteList("Core", "https://github.com/stars/me/lists/core", List.of())), new LinkedHashMap<>()));
         assertEquals(List.of("Core", "Mine", "Core (2)"), List.copyOf(lists.keySet()));
         assertEquals(List.of(), lists.get("Core"));
 

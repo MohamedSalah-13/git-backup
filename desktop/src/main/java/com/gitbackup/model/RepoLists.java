@@ -81,10 +81,11 @@ public final class RepoLists {
      * application whose name GitHub now uses is kept under a free name such as "Work (2)".
      *
      * @param githubUrls the names of the lists that came from GitHub, with their pages; updated
+     * @param renamed    receives the application's lists that moved to a free name (old to new)
      * @return true when anything changed
      */
     public static boolean syncGithub(Map<String, List<String>> lists, Map<String, String> githubUrls,
-                                     List<RemoteList> fetched) {
+                                     List<RemoteList> fetched, Map<String, String> renamed) {
         List<Map.Entry<String, List<String>>> before = List.copyOf(copy(lists).entrySet());
         Map<String, String> urlsBefore = new LinkedHashMap<>(githubUrls);
         Map<String, List<String>> local = new LinkedHashMap<>();
@@ -108,6 +109,9 @@ public final class RepoLists {
                 free = name + " (" + n + ")";
             }
             lists.put(free, members);
+            if (!free.equals(name)) {
+                renamed.put(name, free);
+            }
         });
         return !before.equals(List.copyOf(lists.entrySet())) || !urlsBefore.equals(githubUrls);
     }

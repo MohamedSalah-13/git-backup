@@ -1235,8 +1235,11 @@ public class MainApp extends Application {
             }
         }
         showAccounts(listing);
+        Map<String, String> renamed = new HashMap<>();
         if (config.githubLists && listing.githubLists() != null
-                && RepoLists.syncGithub(config.lists, config.githubListUrls, listing.githubLists())) {
+                && RepoLists.syncGithub(config.lists, config.githubListUrls, listing.githubLists(), renamed)) {
+            // A shown list of the application's own that gave its name to a GitHub list stays shown.
+            config.shownList = renamed.getOrDefault(config.shownList, config.shownList);
             saveConfig();
             if (repoTable != null) {
                 repoTable.refresh();
