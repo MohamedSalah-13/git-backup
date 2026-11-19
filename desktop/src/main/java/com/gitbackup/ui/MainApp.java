@@ -261,10 +261,17 @@ public class MainApp extends Application {
 
         // A newer release is announced, downloaded and installed by the shared desktop-updater library.
         // Pre-releases count: every 0.x release of this program is published as one.
-        updater = AppUpdater.builder("Git Backup")
+        // The release is found by its Windows installer on every system; where the library cannot run
+        // an installer (Linux, macOS) it offers the release's page, which holds the .deb and .dmg.
+        AppUpdater.Builder updaterBuilder = AppUpdater.builder("Git Backup")
                 .source(ReleaseSource.github("MohamedSalah-13/git-backup").asset("*-setup.exe")
-                        .includePreReleases(true))
-                .build();
+                        .includePreReleases(true));
+        // The macOS package cannot carry a 0.x version, so the installer passes the real one (build-installer.ps1).
+        String packagedVersion = System.getProperty("gitbackup.version");
+        if (packagedVersion != null && !packagedVersion.isBlank()) {
+            updaterBuilder.currentVersion(packagedVersion);
+        }
+        updater = updaterBuilder.build();
         // Closing goes through the program's own exit, which asks before it cuts a running backup short.
         updates = UpdatePrompt.create(updater, stage).language(config.language).onExit(this::exitApplication);
         if (!devRun) {

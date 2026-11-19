@@ -47,6 +47,23 @@ java -jar target\git-backup-desktop.jar --check
 - المثبّت غير موقّع رقميًا، فسيعرض Windows تحذير "ناشر غير معروف" عند العميل إلى أن تُشترى شهادة توقيع.
 - لتغيير الأيقونة: عدّل `packaging\MakeIcon.java` ثم `java packaging\MakeIcon.java .`
 
+### Linux و macOS
+
+`jpackage` لا يبني إلا للنظام الذي يعمل عليه، فمثبّتا Linux و macOS يُبنيان على GitHub Actions
+(`.github/workflows/packages.yml`) بنفس السكريبت `build-installer.ps1`:
+
+- عند نشر إصدار (بعد `release.ps1`) يُبنى `GitBackup-<الإصدار>-linux-x64.deb` و `GitBackup-<الإصدار>-macos-arm64.dmg`
+  و `GitBackup-<الإصدار>-macos-x64.dmg` ويُضاف كلٌّ منها إلى نفس الإصدار تلقائيًا.
+- عند طلب دمج يغيّر `desktop/packaging` يُبنى الثلاثة للتجربة ويُحفظون مع التشغيل (Artifacts) دون نشر.
+- يدويًا من صفحة Actions: **Run workflow**، مع وسم إصدار منشور لإضافة الملفات إليه، أو بدون وسم للتجربة فقط.
+
+ما يختلف خارج Windows:
+
+- رمز GitHub لا يُحفظ (الحفظ يعتمد على Windows DPAPI)، و«التشغيل مع Windows» غير متاح.
+- التحديث: يظهر إشعار الإصدار الجديد وزرّ يفتح صفحة الإصدار للتنزيل، دون تثبيت تلقائي.
+- macOS يرفض إصدارًا يبدأ بصفر، فالحزمة هناك تحمل `1.x.y` بدل `0.x.y`؛ البرنامج نفسه يعرض ويقارن الرقم الحقيقي.
+- ملف `.dmg` غير موقّع من Apple، فيُفتح أول مرة من **System Settings ← Privacy & Security ← Open Anyway**.
+
 ## نشر إصدار
 
 ```powershell
