@@ -52,6 +52,18 @@ public final class HttpJson {
         return new Page(body.length == 0 ? JSON.nullNode() : JSON.readTree(body), response.headers());
     }
 
+    /** Sends {@code body} as JSON and parses the answer. */
+    public JsonNode post(String url, JsonNode body) throws IOException {
+        HttpRequest request = request(url)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(JSON.writeValueAsBytes(body)))
+                .build();
+        HttpResponse<byte[]> response = send(request, HttpResponse.BodyHandlers.ofByteArray());
+        check(response.statusCode());
+        byte[] answer = response.body();
+        return answer.length == 0 ? JSON.nullNode() : JSON.readTree(answer);
+    }
+
     /**
      * Downloads a file. Hosts answer file requests with a redirect to a storage server that
      * must not receive the account's token, so the redirect is followed without it.

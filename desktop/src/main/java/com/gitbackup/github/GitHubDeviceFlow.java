@@ -24,8 +24,11 @@ import java.util.function.BooleanSupplier;
 public final class GitHubDeviceFlow {
     /** Client ID of the "Git Backup" OAuth App. Empty until the app is registered on GitHub. */
     static final String CLIENT_ID = "";
-    /** Read access to private repositories needs "repo"; "read:org" lists organisation repositories. */
-    static final String SCOPES = "repo read:org";
+    /**
+     * Read access to private repositories needs "repo"; "read:org" lists organisation repositories;
+     * "read:user" reads the account's private star lists.
+     */
+    static final String SCOPES = "repo read:org read:user";
 
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(20)).build();
     private static final ObjectMapper JSON = new ObjectMapper();

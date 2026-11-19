@@ -4,6 +4,7 @@ import com.gitbackup.backup.BackupService;
 import com.gitbackup.backup.BackupService.RepoStatus;
 import com.gitbackup.backup.BackupService.Status;
 import com.gitbackup.github.TokenStore;
+import com.gitbackup.model.RemoteList;
 import com.gitbackup.model.RepoInfo;
 import java.time.Instant;
 import java.util.List;
@@ -35,7 +36,13 @@ final class DemoData {
                 repo("acme-labs", "legacy-portal", true, true, 88_000, "2026-06-20T08:15:00Z", Status.CURRENT, "2026-11-17T21:00:00Z"));
         return new BackupService.Listing(repos,
                 List.of(new BackupService.AccountInfo(RepoInfo.GITHUB, "acme-labs", TokenStore.Source.SAVED_TOKEN)),
-                List.of(), true);
+                List.of(), true, List.of(
+                        new RemoteList("⭐ Core systems", "https://github.com/stars/acme-labs/lists/core",
+                                List.of("acme-labs/web-store", "acme-labs/api-gateway", "acme-labs/data-pipeline")),
+                        new RemoteList("🚀 Active", "https://github.com/stars/acme-labs/lists/active",
+                                List.of("acme-labs/mobile-app", "acme-labs/docs", "acme-labs/blog")),
+                        new RemoteList("📦 Archive", "https://github.com/stars/acme-labs/lists/archive",
+                                List.of("acme-labs/legacy-portal", "acme-labs/playground"))));
     }
 
     private static RepoStatus repo(String owner, String name, boolean isPrivate, boolean archived, long sizeKb,

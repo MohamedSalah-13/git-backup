@@ -75,6 +75,57 @@ public final class RepoLists {
         return members != null && members.contains(key);
     }
 
+    /**
+     * Replaces the lists brought from GitHub with {@code fetched}. GitHub's lists come first, in
+     * GitHub's order, followed by the lists made in the application. A list made in the
+     * application whose name GitHub now uses is kept under a free name such as "Work (2)".
+     *
+     * @param githubUrls the names of the lists that came from GitHub, with their pages; updated
+     * @return true when anything changed
+     */
+    public static boolean syncGithub(Map<String, List<String>> lists, Map<String, String> githubUrls,
+                                     List<RemoteList> fetched) {
+        List<Map.Entry<String, List<String>>> before = List.copyOf(copy(lists).entrySet());
+        Map<String, String> urlsBefore = new LinkedHashMap<>(githubUrls);
+        Map<String, List<String>> local = new LinkedHashMap<>();
+        lists.forEach((name, members) -> {
+            if (!githubUrls.containsKey(name)) {
+                local.put(name, members);
+            }
+        });
+        lists.clear();
+        githubUrls.clear();
+        for (RemoteList list : fetched) {
+            if (taken(lists, list.name(), null)) {
+                continue; // GitHub does not allow two lists with one name; ignore a repeat
+            }
+            create(lists, list.name(), list.keys());
+            githubUrls.put(list.name(), list.url());
+        }
+        local.forEach((name, members) -> {
+            String free = name;
+            for (int n = 2; taken(lists, free, null); n++) {
+                free = name + " (" + n + ")";
+            }
+            lists.put(free, members);
+        });
+        return !before.equals(List.copyOf(lists.entrySet())) || !urlsBefore.equals(githubUrls);
+    }
+
+    /** Removes every list that came from GitHub. @return true when one was removed */
+    public static boolean dropGithub(Map<String, List<String>> lists, Map<String, String> githubUrls) {
+        boolean removed = lists.keySet().removeAll(githubUrls.keySet());
+        boolean had = !githubUrls.isEmpty();
+        githubUrls.clear();
+        return removed || had;
+    }
+
+    private static Map<String, List<String>> copy(Map<String, List<String>> lists) {
+        Map<String, List<String>> copy = new LinkedHashMap<>();
+        lists.forEach((name, members) -> copy.put(name, new ArrayList<>(members)));
+        return copy;
+    }
+
     /** The names of the lists that hold {@code key}, in list order. */
     public static List<String> listsOf(Map<String, List<String>> lists, String key) {
         List<String> names = new ArrayList<>();
