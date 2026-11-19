@@ -61,6 +61,14 @@ public final class JsonStore {
         if (config.lastVerify == null) {
             config.lastVerify = "";
         }
+        config.watchEveryMinutes = Math.max(1, config.watchEveryMinutes);
+        if (config.lists == null) {
+            config.lists = new java.util.LinkedHashMap<>();
+        }
+        config.lists.values().removeIf(java.util.Objects::isNull);
+        if (config.shownList == null) {
+            config.shownList = "";
+        }
         return config;
     }
 

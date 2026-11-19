@@ -2,7 +2,9 @@ package com.gitbackup.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** User settings. Field names match config.json of the PowerShell version. */
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -56,4 +58,16 @@ public class AppConfig {
     public int verifyEveryDays = 7;
     /** Date (yyyy-MM-dd) of the last completed check; written by the application. */
     public String lastVerify = "";
+
+    /** Look at the accounts regularly and announce repositories that got new commits. */
+    public boolean watchEnabled = true;
+    /** Minutes between two looks. */
+    public int watchEveryMinutes = 15;
+    /** Back up the saved selection by itself when a look finds new commits. */
+    public boolean watchAutoBackup = false;
+
+    /** Named groups of repositories, like GitHub lists: list name to repository keys, in the user's order. */
+    public Map<String, List<String>> lists = new LinkedHashMap<>();
+    /** The list the window shows; empty means every repository. */
+    public String shownList = "";
 }

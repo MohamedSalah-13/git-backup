@@ -470,7 +470,7 @@ public final class BackupService {
      * True when the name, owner/name or key (host:owner/name) matches one of the patterns;
      * * is a wildcard, case is ignored.
      */
-    static boolean matchesAny(RepoInfo repo, List<String> patterns) {
+    public static boolean matchesAny(RepoInfo repo, List<String> patterns) {
         for (String pattern : patterns) {
             if (pattern == null || pattern.isBlank()) {
                 continue;
