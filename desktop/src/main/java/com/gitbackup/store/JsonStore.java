@@ -66,6 +66,10 @@ public final class JsonStore {
             config.lists = new java.util.LinkedHashMap<>();
         }
         config.lists.values().removeIf(java.util.Objects::isNull);
+        if (config.githubListUrls == null) {
+            config.githubListUrls = new java.util.LinkedHashMap<>();
+        }
+        config.githubListUrls.keySet().retainAll(config.lists.keySet());
         if (config.shownList == null) {
             config.shownList = "";
         }

@@ -8,6 +8,7 @@ import com.gitbackup.hosts.GitLabClient;
 import com.gitbackup.hosts.HostClient;
 import com.gitbackup.model.AppConfig;
 import com.gitbackup.model.BackupState;
+import com.gitbackup.model.RemoteList;
 import com.gitbackup.model.RepoInfo;
 import com.gitbackup.model.RunRecord;
 import com.gitbackup.store.AppPaths;
@@ -50,10 +51,16 @@ public final class BackupService {
     }
 
     /**
-     * @param problems accounts that could not be read, as "Host: reason"; the others are listed
+     * @param problems    accounts that could not be read, as "Host: reason"; the others are listed
+     * @param githubLists the GitHub account's star lists; null when they were not read (turned off,
+     *                    no GitHub account, or GitHub refused), so the lists already saved stay
      */
     public record Listing(List<RepoStatus> repos, List<AccountInfo> accounts, List<String> problems,
-                          boolean destinationFound) {
+                          boolean destinationFound, List<RemoteList> githubLists) {
+        public Listing(List<RepoStatus> repos, List<AccountInfo> accounts, List<String> problems,
+                       boolean destinationFound) {
+            this(repos, accounts, problems, destinationFound, null);
+        }
     }
 
     public record Summary(boolean started, int backedUp, int unchanged, int empty, int failed, int removed) {
@@ -138,12 +145,16 @@ public final class BackupService {
         List<AccountInfo> accountInfos = new ArrayList<>();
         List<String> problems = new ArrayList<>();
         List<Account> accounts = accounts(config);
+        List<RemoteList> githubLists = null;
         IOException firstError = null;
         for (Account account : accounts) {
             try {
                 String login = account.client().login();
                 all.addAll(account.client().listRepos());
                 accountInfos.add(new AccountInfo(account.client().host(), login, account.source()));
+                if (config.githubLists && account.client() instanceof GitHubClient github) {
+                    githubLists = readLists(github);
+                }
             } catch (IOException e) {
                 firstError = firstError == null ? e : firstError;
                 problems.add(RepoInfo.hostLabel(account.client().host()) + ": " + BackupEngine.describe(e));
@@ -167,7 +178,16 @@ public final class BackupService {
             rows.add(new RepoStatus(repo, selected, statusOf(repo, entry, destination),
                     entry == null ? "" : entry.backedUp));
         }
-        return new Listing(rows, accountInfos, problems, destinationFound);
+        return new Listing(rows, accountInfos, problems, destinationFound, githubLists);
+    }
+
+    /** Lists are an extra: when GitHub refuses them (an older sign-in without "read:user"), the repositories still show. */
+    private static List<RemoteList> readLists(GitHubClient github) {
+        try {
+            return github.listLists();
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
     }
 
     private static Status statusOf(RepoInfo repo, BackupState.Entry entry, Path destination) {

@@ -783,6 +783,23 @@ public class MainApp extends Application {
         });
         Tile orgsTile = tile(t("settings.orgs"), t("settings.orgs.desc"), Feather.USERS, orgs);
 
+        ToggleSwitch githubLists = new ToggleSwitch();
+        githubLists.setSelected(config.githubLists);
+        githubLists.disableProperty().bind(busyProperty);
+        githubLists.selectedProperty().addListener((observable, before, after) -> {
+            config.githubLists = after;
+            if (after) {
+                if (saveConfig()) {
+                    reloadList();
+                }
+            } else {
+                RepoLists.dropGithub(config.lists, config.githubListUrls);
+                listsChanged();
+            }
+        });
+        Tile githubListsTile = tile(t("settings.githubLists"), t("settings.githubLists.desc"), Feather.BOOKMARK,
+                githubLists);
+
         // Checks and notifications
         ToggleSwitch verify = new ToggleSwitch();
         verify.setSelected(config.verifyEnabled);
@@ -949,7 +966,8 @@ public class MainApp extends Application {
 
         VBox content = new VBox(14,
                 section(t("settings.section.backup"), folderTile, keepTile, encryptTile, extrasTile),
-                section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile),
+                section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile,
+                        githubListsTile),
                 section(t("settings.section.schedule"), scheduleTile, autoStartTile),
                 section(t("settings.section.watch"), watchTile, watchBackupTile),
                 section(t("settings.section.checks"), verifyTile, notifyTile),
@@ -1217,6 +1235,16 @@ public class MainApp extends Application {
             }
         }
         showAccounts(listing);
+        Map<String, String> renamed = new HashMap<>();
+        if (config.githubLists && listing.githubLists() != null
+                && RepoLists.syncGithub(config.lists, config.githubListUrls, listing.githubLists(), renamed)) {
+            // A shown list of the application's own that gave its name to a GitHub list stays shown.
+            config.shownList = renamed.getOrDefault(config.shownList, config.shownList);
+            saveConfig();
+            if (repoTable != null) {
+                repoTable.refresh();
+            }
+        }
         fillListBar();
         applyFilter();
         if (fromWatch) {
@@ -1316,7 +1344,19 @@ public class MainApp extends Application {
                 applyFilter();
             }
         });
-        if (!name.isEmpty()) {
+        String githubUrl = config.githubListUrls.get(name);
+        if (githubUrl != null) {
+            HBox graphic = new HBox(6, Icons.icon(Feather.GITHUB), count);
+            graphic.setAlignment(Pos.CENTER);
+            chip.setGraphic(graphic);
+            MenuItem open = new MenuItem(t("lists.github.open"), Icons.icon(Feather.EXTERNAL_LINK));
+            open.setOnAction(event -> getHostServices().showDocument(githubUrl));
+            MenuItem refresh = new MenuItem(t("lists.github.refresh"), Icons.icon(Feather.REFRESH_CW));
+            refresh.disableProperty().bind(busyProperty);
+            refresh.setOnAction(event -> reloadList());
+            chip.setContextMenu(new ContextMenu(open, refresh));
+            chip.setTooltip(new javafx.scene.control.Tooltip(t("lists.github.hint")));
+        } else if (!name.isEmpty()) {
             MenuItem rename = new MenuItem(t("lists.rename"), Icons.icon(Feather.EDIT_2));
             rename.setOnAction(event -> renameList(name));
             MenuItem delete = new MenuItem(t("lists.delete"), Icons.icon(Feather.TRASH_2));
@@ -1341,6 +1381,9 @@ public class MainApp extends Application {
         }
         Menu addTo = new Menu(t("lists.addTo"), Icons.icon(Feather.BOOKMARK));
         for (String name : config.lists.keySet()) {
+            if (config.githubListUrls.containsKey(name)) {
+                continue; // GitHub's lists are changed on GitHub
+            }
             CheckMenuItem item = new CheckMenuItem(name);
             item.setSelected(keys.stream().allMatch(key -> RepoLists.contains(config.lists, name, key)));
             item.setOnAction(event -> {
@@ -1353,14 +1396,14 @@ public class MainApp extends Application {
             });
             addTo.getItems().add(item);
         }
-        if (!config.lists.isEmpty()) {
+        if (!addTo.getItems().isEmpty()) {
             addTo.getItems().add(new SeparatorMenuItem());
         }
         MenuItem create = new MenuItem(t("lists.newFromSelection"), Icons.icon(Feather.PLUS));
         create.setOnAction(event -> createList(keys));
         addTo.getItems().add(create);
         menu.getItems().add(addTo);
-        if (!config.shownList.isEmpty()) {
+        if (!config.shownList.isEmpty() && !config.githubListUrls.containsKey(config.shownList)) {
             String shown = config.shownList;
             MenuItem remove = new MenuItem(MessageFormat.format(t("lists.removeFrom"), shown), Icons.icon(Feather.X));
             remove.setOnAction(event -> {

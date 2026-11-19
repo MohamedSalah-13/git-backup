@@ -68,6 +68,10 @@ public class AppConfig {
 
     /** Named groups of repositories, like GitHub lists: list name to repository keys, in the user's order. */
     public Map<String, List<String>> lists = new LinkedHashMap<>();
+    /** Bring the account's GitHub star lists into {@link #lists}, refreshed with every listing. */
+    public boolean githubLists = true;
+    /** The lists in {@link #lists} that came from GitHub (name to the list's page); changed only on GitHub. */
+    public Map<String, String> githubListUrls = new LinkedHashMap<>();
     /** The list the window shows; empty means every repository. */
     public String shownList = "";
 }
