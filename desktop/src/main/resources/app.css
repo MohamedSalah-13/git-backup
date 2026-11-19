@@ -126,3 +126,18 @@
     -fx-font-weight: bold;
     -fx-text-fill: -color-accent-fg;
 }
+
+/* ------------------------------------------------------------- list chips */
+
+.list-chip .list-count {
+    -fx-text-fill: -color-fg-muted;
+    -fx-font-size: 11px;
+    -fx-background-color: -color-bg-subtle;
+    -fx-background-radius: 8;
+    -fx-padding: 0 6 0 6;
+}
+
+.list-chip:selected .list-count {
+    -fx-text-fill: -color-fg-emphasis;
+    -fx-background-color: transparent;
+}

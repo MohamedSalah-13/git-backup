@@ -6,6 +6,7 @@ import atlantafx.base.controls.ToggleSwitch;
 import atlantafx.base.theme.Styles;
 import com.gitbackup.backup.BackupLog;
 import com.gitbackup.backup.BackupService;
+import com.gitbackup.backup.ChangeWatch;
 import com.gitbackup.backup.PasswordRequiredException;
 import com.gitbackup.backup.RestoreService;
 import com.gitbackup.backup.RestoreService.BackupVersion;
@@ -15,6 +16,7 @@ import com.gitbackup.github.GitHubException;
 import com.gitbackup.github.TokenStore;
 import com.gitbackup.model.AppConfig;
 import com.gitbackup.model.RepoInfo;
+import com.gitbackup.model.RepoLists;
 import com.gitbackup.store.AppPaths;
 import com.gitbackup.store.AutoStart;
 import com.gitbackup.store.SingleInstance;
@@ -25,6 +27,7 @@ import com.hamza.updater.fx.UpdatePrompt;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Path;
 import java.text.MessageFormat;
 import java.time.Instant;
@@ -37,11 +40,14 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.ResourceBundle;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -74,23 +80,31 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.DialogPane;
 import javafx.scene.control.Label;
+import javafx.scene.control.Menu;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.SelectionMode;
 import javafx.scene.control.Separator;
+import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToggleButton;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxTableCell;
 import javafx.scene.image.Image;
@@ -99,6 +113,7 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.image.PixelReader;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -136,6 +151,17 @@ public class MainApp extends Application {
             FXCollections.observableArrayList(row -> new Observable[] {row.selectedProperty()});
     private final FilteredList<RepoRow> visibleRows = new FilteredList<>(rows);
     private final AtomicBoolean stopRequested = new AtomicBoolean();
+    /** Looks for new commits on its own thread, so a slow network never holds up the window. */
+    private final ExecutorService watcher = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "change-watch");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final ChangeWatch changeWatch = new ChangeWatch();
+    private long lastWatch = System.currentTimeMillis();
+    private String lastWatchTime = "";
+    private boolean watching;
+    private boolean watchFailing;
 
     private Stage stage;
     private AppConfig config;
@@ -165,6 +191,8 @@ public class MainApp extends Application {
     // Controls are rebuilt when the language changes.
     private Label scheduleChip;
     private Label encryptChip;
+    private Label watchChip;
+    private FlowPane listBar;
     private Label countLabel;
     private Label statusLabel;
     private TextField searchField;
@@ -277,6 +305,7 @@ public class MainApp extends Application {
             updaterBuilder.currentVersion(packagedVersion);
         }
         updater = updaterBuilder.build();
+        stage.setTitle(windowTitle());
         // Closing goes through the program's own exit, which asks before it cuts a running backup short.
         // Unless turned off in the settings, the release is downloaded before anybody is asked: the program
         // sits by the clock all day, so by the time its window is opened the question is "install it?", not
@@ -287,7 +316,11 @@ public class MainApp extends Application {
             updates.start();
         }
 
-        Timeline clock = new Timeline(new KeyFrame(Duration.seconds(30), event -> checkSchedule()));
+        // Every 15 seconds, so that "every minute" for the change watch means about a minute.
+        Timeline clock = new Timeline(new KeyFrame(Duration.seconds(15), event -> {
+            checkSchedule();
+            checkWatch();
+        }));
         clock.setCycleCount(Timeline.INDEFINITE);
         clock.play();
         reloadList();
@@ -296,6 +329,7 @@ public class MainApp extends Application {
     @Override
     public void stop() {
         worker.shutdownNow();
+        watcher.shutdownNow();
         if (tray != null) {
             tray.remove();
         }
@@ -364,6 +398,92 @@ public class MainApp extends Application {
             // For example Google Drive was not running yet: try again later, not every 30 seconds.
             autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
         }
+    }
+
+    // ---------------------------------------------------------- change watch
+
+    /**
+     * Called with the clock: when the chosen interval has passed, reads the repository lists of
+     * every account again in the background and compares them with the previous look.
+     */
+    private void checkWatch() {
+        long now = System.currentTimeMillis();
+        if (watching || busy || !listLoaded || DemoData.enabled()
+                || !ChangeWatch.isDue(config.watchEnabled, config.watchEveryMinutes, lastWatch, now)) {
+            return;
+        }
+        watching = true;
+        lastWatch = now;
+        watcher.submit(() -> {
+            try {
+                BackupService.Listing listing = service.list();
+                Platform.runLater(() -> afterWatch(listing, null));
+            } catch (Exception e) {
+                Platform.runLater(() -> afterWatch(null, e));
+            }
+        });
+    }
+
+    private void afterWatch(BackupService.Listing listing, Exception error) {
+        watching = false;
+        lastWatchTime = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT));
+        refreshHeader();
+        if (error != null) {
+            // Once per outage, not at every look while the network is down.
+            if (!watchFailing) {
+                appendLog(MessageFormat.format(t("watch.failed"), String.valueOf(error.getMessage())));
+            }
+            watchFailing = true;
+            return;
+        }
+        watchFailing = false;
+        List<RepoInfo> changed = changeWatch.update(repos(listing));
+        if (changed.isEmpty()) {
+            return;
+        }
+        if (!busy) {
+            showListing(listing, true); // the table follows, the status line stays
+        }
+        announceChanges(changed);
+        if (config.watchAutoBackup && !busy && !config.destination.isBlank()
+                && changed.stream().anyMatch(this::inSavedSelection)) {
+            startBackup("watch", false);
+        }
+    }
+
+    private static List<RepoInfo> repos(BackupService.Listing listing) {
+        return listing.repos().stream().map(BackupService.RepoStatus::repo).toList();
+    }
+
+    private boolean inSavedSelection(RepoInfo repo) {
+        return config.include.isEmpty() || BackupService.matchesAny(repo, config.include);
+    }
+
+    /** A line in the log, the status line and a notification next to the clock. */
+    private void announceChanges(List<RepoInfo> changed) {
+        int shown = Math.min(3, changed.size());
+        StringBuilder names = new StringBuilder();
+        for (int i = 0; i < shown; i++) {
+            names.append(i == 0 ? "" : ", ").append(changed.get(i).fullName());
+        }
+        if (changed.size() > shown) {
+            names.append(MessageFormat.format(t("watch.more"), changed.size() - shown));
+        }
+        String message = changed.size() == 1
+                ? MessageFormat.format(t("watch.foundOne"), names)
+                : MessageFormat.format(t("watch.found"), changed.size(), names);
+        appendLog(lastWatchTime + "  " + message);
+        if (!busy) {
+            setStatus(message);
+        }
+        // Asked for by turning the watch on, so only "never" keeps it quiet.
+        if (tray != null && !"never".equals(config.notify)) {
+            tray.notify(t("app.title"), message, false);
+        }
+    }
+
+    private String watchIntervalText(int minutes) {
+        return t("watch.every." + ChangeWatch.nearestInterval(minutes));
     }
 
     // --------------------------------------------------------- notifications
@@ -444,11 +564,15 @@ public class MainApp extends Application {
         searchField = search;
         searchField.setPromptText(t("prompt.search"));
         searchField.setPrefWidth(240);
-        searchField.textProperty().addListener((observable, before, after) -> applySearch(after));
+        searchField.textProperty().addListener((observable, before, after) -> applyFilter());
         countLabel = new Label();
         countLabel.getStyleClass().add("count");
         HBox pickRow = row(allButton, noneButton, neededButton, refreshButton, gap(6), searchField, spacer(),
                 countLabel);
+
+        listBar = new FlowPane(6, 6);
+        listBar.setAlignment(Pos.CENTER_LEFT);
+        listBar.getStyleClass().add("list-bar");
 
         repoTable = buildTable();
         TableView<RepoRow> table = repoTable;
@@ -491,11 +615,13 @@ public class MainApp extends Application {
         logArea.setPrefRowCount(8);
         logArea.setMinHeight(110);
 
-        VBox body = new VBox(10, pickRow, table, runRow, logArea);
+        VBox body = new VBox(10, listBar, pickRow, table, runRow, logArea);
         body.setPadding(new Insets(12));
         BorderPane root = new BorderPane(body);
         root.setTop(buildHeader());
         refreshHeader();
+        fillListBar();
+        applyFilter();
         updateCount();
         applyBusyState();
         return root;
@@ -512,7 +638,9 @@ public class MainApp extends Application {
         HBox.setHgrow(destinationLabel, Priority.SOMETIMES);
         scheduleChip = Icons.with(new Label(), Feather.CLOCK);
         encryptChip = Icons.with(new Label(), Feather.LOCK);
-        for (Label label : List.of(accountLabel, destinationLabel, scheduleChip, encryptChip)) {
+        watchChip = Icons.with(new Label(), Feather.EYE);
+        watchChip.setTooltip(new javafx.scene.control.Tooltip());
+        for (Label label : List.of(accountLabel, destinationLabel, scheduleChip, encryptChip, watchChip)) {
             label.getStyleClass().add("header-item");
         }
 
@@ -533,8 +661,8 @@ public class MainApp extends Application {
         Button settingsButton = Icons.button(t("button.settings"), Feather.SETTINGS);
         settingsButton.setOnAction(event -> showSettings());
 
-        HBox bar = row(accountLabel, divider(), destinationLabel, divider(), scheduleChip, divider(), encryptChip,
-                spacer(), historyButton, settingsButton);
+        HBox bar = row(accountLabel, divider(), destinationLabel, divider(), scheduleChip, divider(), watchChip,
+                divider(), encryptChip, spacer(), historyButton, settingsButton);
         bar.setSpacing(10);
         bar.getStyleClass().add("header-bar");
         return bar;
@@ -551,6 +679,13 @@ public class MainApp extends Application {
                 : t("header.scheduleOff"));
         encryptChip.setText(t(config.encrypt ? "header.encrypted" : "header.notEncrypted"));
         encryptChip.setGraphic(Icons.icon(config.encrypt ? Feather.LOCK : Feather.UNLOCK));
+        watchChip.setText(config.watchEnabled
+                ? MessageFormat.format(t("header.watchOn"), watchIntervalText(config.watchEveryMinutes))
+                : t("header.watchOff"));
+        watchChip.setGraphic(Icons.icon(config.watchEnabled ? Feather.EYE : Feather.EYE_OFF));
+        watchChip.getTooltip().setText(lastWatchTime.isEmpty()
+                ? t("header.watchNever")
+                : MessageFormat.format(t("header.watchLast"), ltr(lastWatchTime)));
     }
 
     private static Node divider() {
@@ -719,6 +854,53 @@ public class MainApp extends Application {
                 t(AutoStart.available() ? "settings.autostart.desc" : "label.scheduleHintDev"), Feather.POWER,
                 autoStart);
 
+        // Change watch
+        ComboBox<Integer> interval = new ComboBox<>();
+        for (int minutes : ChangeWatch.INTERVALS) {
+            interval.getItems().add(minutes);
+        }
+        interval.setConverter(new StringConverter<>() {
+            @Override
+            public String toString(Integer minutes) {
+                if (minutes == null) {
+                    return "";
+                }
+                String value = watchIntervalText(minutes);
+                return value.isEmpty() ? value : value.substring(0, 1).toUpperCase(Locale.ROOT) + value.substring(1);
+            }
+
+            @Override
+            public Integer fromString(String value) {
+                return null;
+            }
+        });
+        interval.setValue(ChangeWatch.nearestInterval(config.watchEveryMinutes));
+        ToggleSwitch watch = new ToggleSwitch();
+        watch.setSelected(config.watchEnabled);
+        interval.disableProperty().bind(watch.selectedProperty().not());
+        interval.setOnAction(event -> {
+            if (interval.getValue() != null) {
+                config.watchEveryMinutes = interval.getValue();
+                saveConfig();
+                refreshHeader();
+            }
+        });
+        ToggleSwitch watchBackup = new ToggleSwitch();
+        watchBackup.setSelected(config.watchAutoBackup);
+        watchBackup.disableProperty().bind(watch.selectedProperty().not());
+        watchBackup.selectedProperty().addListener((observable, before, after) -> {
+            config.watchAutoBackup = after;
+            saveConfig();
+        });
+        watch.selectedProperty().addListener((observable, before, after) -> {
+            config.watchEnabled = after;
+            saveConfig();
+            refreshHeader();
+        });
+        Tile watchTile = tile(t("settings.watch"), t("settings.watch.desc"), Feather.EYE, actions(interval, watch));
+        Tile watchBackupTile = tile(t("settings.watch.backup"), t("settings.watch.backup.desc"),
+                Feather.UPLOAD_CLOUD, watchBackup);
+
         // Appearance
         ComboBox<String> language = new ComboBox<>(FXCollections.observableArrayList(LANGUAGE_NAMES));
         language.getSelectionModel().select(Math.max(0, Arrays.asList(LANGUAGES).indexOf(config.language)));
@@ -769,6 +951,7 @@ public class MainApp extends Application {
                 section(t("settings.section.backup"), folderTile, keepTile, encryptTile, extrasTile),
                 section(t("settings.section.account"), accountTile, gitlabTile, bitbucketTile, orgsTile),
                 section(t("settings.section.schedule"), scheduleTile, autoStartTile),
+                section(t("settings.section.watch"), watchTile, watchBackupTile),
                 section(t("settings.section.checks"), verifyTile, notifyTile),
                 section(t("settings.section.appearance"), languageTile, themeTile),
                 section(t("settings.section.updates"), updatesTile, downloadAheadTile));
@@ -845,6 +1028,10 @@ public class MainApp extends Application {
         table.setEditable(true);
         table.getStyleClass().add(Styles.STRIPED);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_ALL_COLUMNS);
+        table.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+        ContextMenu rowMenu = new ContextMenu();
+        rowMenu.setOnShowing(event -> fillRowMenu(rowMenu));
+        table.setContextMenu(rowMenu);
 
         TableColumn<RepoRow, Boolean> pick = new TableColumn<>();
         pick.setCellValueFactory(cell -> cell.getValue().selectedProperty());
@@ -869,6 +1056,9 @@ public class MainApp extends Application {
                 value -> ltr(WHEN.format(value.atZone(ZoneId.systemDefault()))), null, null);
         TableColumn<RepoRow, String> lastBackup = column("column.backup", 175,
                 RepoRow::lastBackup, MainApp::formatLocalTime, null, null);
+        TableColumn<RepoRow, String> lists = column("column.lists", 130,
+                row -> String.join(t("lists.separator"), RepoLists.listsOf(config.lists, row.repo().key())),
+                value -> value, null, value -> value.isEmpty() ? null : Feather.BOOKMARK);
         TableColumn<RepoRow, BackupService.Status> status = column("column.status", 170,
                 RepoRow::status, value -> t("status." + value.name()),
                 value -> switch (value) {
@@ -886,6 +1076,7 @@ public class MainApp extends Application {
 
         table.getColumns().add(pick);
         table.getColumns().add(name);
+        table.getColumns().add(lists);
         table.getColumns().add(type);
         table.getColumns().add(size);
         table.getColumns().add(pushed);
@@ -934,7 +1125,8 @@ public class MainApp extends Application {
     /** A row of controls; buttons, tick boxes and chips keep their full text, labels may shorten. */
     private HBox row(Node... children) {
         for (Node child : children) {
-            if (child instanceof javafx.scene.control.ButtonBase || child == scheduleChip || child == encryptChip) {
+            if (child instanceof javafx.scene.control.ButtonBase || child == scheduleChip || child == encryptChip
+                    || child == watchChip) {
                 ((Region) child).setMinWidth(Region.USE_PREF_SIZE);
             }
         }
@@ -978,6 +1170,14 @@ public class MainApp extends Application {
     }
 
     private void showListing(BackupService.Listing listing) {
+        showListing(listing, false);
+    }
+
+    /**
+     * Fills the table from a fresh list. A list read by the change watch ({@code fromWatch})
+     * leaves the status line alone; any other becomes the watch's new starting point.
+     */
+    private void showListing(BackupService.Listing listing, boolean fromWatch) {
         // Keep ticks the user changed but has not saved yet.
         Map<String, Boolean> previous = new HashMap<>();
         for (RepoRow row : rows) {
@@ -998,9 +1198,31 @@ public class MainApp extends Application {
         }
         multipleOwners = owners.size() > 1;
         multipleHosts = hosts.size() > 1;
+        // The highlighted rows stay highlighted, for example while the change watch refreshes.
+        Set<String> highlighted = new HashSet<>();
+        if (repoTable != null) {
+            for (RepoRow row : repoTable.getSelectionModel().getSelectedItems()) {
+                if (row != null) {
+                    highlighted.add(row.repo().key());
+                }
+            }
+        }
         rows.setAll(fresh);
         listLoaded = true;
+        if (repoTable != null && !highlighted.isEmpty()) {
+            for (RepoRow row : repoTable.getItems()) {
+                if (highlighted.contains(row.repo().key())) {
+                    repoTable.getSelectionModel().select(row);
+                }
+            }
+        }
         showAccounts(listing);
+        fillListBar();
+        applyFilter();
+        if (fromWatch) {
+            return;
+        }
+        changeWatch.update(repos(listing));
 
         String state = t("state.ready");
         if (config.destination.isBlank()) {
@@ -1028,11 +1250,204 @@ public class MainApp extends Application {
         devHook();
     }
 
-    private void applySearch(String query) {
+    /** Shows the rows of the chosen list that match the search. */
+    private void applyFilter() {
+        String query = searchField == null ? null : searchField.getText();
         String needle = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        visibleRows.setPredicate(needle.isEmpty()
+        List<String> members = config.lists.get(config.shownList);
+        Set<String> inList = config.shownList.isEmpty() || members == null ? null : new HashSet<>(members);
+        visibleRows.setPredicate(needle.isEmpty() && inList == null
                 ? null
-                : row -> row.repo().key().toLowerCase(Locale.ROOT).contains(needle));
+                : row -> (inList == null || inList.contains(row.repo().key()))
+                        && row.repo().key().toLowerCase(Locale.ROOT).contains(needle));
+        if (repoTable != null) {
+            Label placeholder = new Label(inList != null && inList.isEmpty() && needle.isEmpty()
+                    ? t("lists.empty") : "");
+            placeholder.getStyleClass().add("muted");
+            placeholder.setWrapText(true);
+            repoTable.setPlaceholder(placeholder);
+        }
+    }
+
+    // ----------------------------------------------------------------- lists
+
+    /** The chips above the table: every repository, each list with its size, and "New list". */
+    private void fillListBar() {
+        if (listBar == null) {
+            return;
+        }
+        if (!config.shownList.isEmpty() && !config.lists.containsKey(config.shownList)) {
+            config.shownList = "";
+        }
+        Set<String> listed = new HashSet<>();
+        for (RepoRow row : rows) {
+            listed.add(row.repo().key());
+        }
+        ToggleGroup group = new ToggleGroup();
+        listBar.getChildren().clear();
+        listBar.getChildren().add(listChip(group, "", t("lists.all"), rows.size()));
+        for (Map.Entry<String, List<String>> list : config.lists.entrySet()) {
+            long size = list.getValue().stream().filter(listed::contains).count();
+            listBar.getChildren().add(listChip(group, list.getKey(), list.getKey(), size));
+        }
+        Button create = Icons.button(t("lists.new"), Feather.PLUS);
+        create.getStyleClass().addAll(Styles.FLAT, Styles.SMALL);
+        create.setOnAction(event -> createList(List.of()));
+        listBar.getChildren().add(create);
+    }
+
+    private ToggleButton listChip(ToggleGroup group, String name, String label, long size) {
+        ToggleButton chip = new ToggleButton(label);
+        chip.setToggleGroup(group);
+        chip.getStyleClass().addAll(Styles.ROUNDED, Styles.SMALL, "list-chip");
+        Label count = new Label(ltr(String.valueOf(size)));
+        count.getStyleClass().add("list-count");
+        chip.setGraphic(count);
+        chip.setContentDisplay(ContentDisplay.RIGHT);
+        chip.setGraphicTextGap(8);
+        chip.setMinWidth(Region.USE_PREF_SIZE);
+        chip.setSelected(name.equals(config.shownList));
+        chip.setOnAction(event -> {
+            // A click on the chosen chip keeps it chosen.
+            chip.setSelected(true);
+            if (!name.equals(config.shownList)) {
+                config.shownList = name;
+                saveConfig();
+                applyFilter();
+            }
+        });
+        if (!name.isEmpty()) {
+            MenuItem rename = new MenuItem(t("lists.rename"), Icons.icon(Feather.EDIT_2));
+            rename.setOnAction(event -> renameList(name));
+            MenuItem delete = new MenuItem(t("lists.delete"), Icons.icon(Feather.TRASH_2));
+            delete.setOnAction(event -> deleteList(name));
+            chip.setContextMenu(new ContextMenu(rename, delete));
+            chip.setTooltip(new javafx.scene.control.Tooltip(t("lists.chipHint")));
+        }
+        return chip;
+    }
+
+    /** The right-click menu of the table, built for the rows highlighted at that moment. */
+    private void fillRowMenu(ContextMenu menu) {
+        menu.getItems().clear();
+        List<RepoRow> picked = repoTable.getSelectionModel().getSelectedItems().stream()
+                .filter(java.util.Objects::nonNull).toList();
+        List<String> keys = picked.stream().map(row -> row.repo().key()).toList();
+        if (keys.isEmpty()) {
+            MenuItem hint = new MenuItem(t("lists.pickRows"));
+            hint.setDisable(true);
+            menu.getItems().add(hint);
+            return;
+        }
+        Menu addTo = new Menu(t("lists.addTo"), Icons.icon(Feather.BOOKMARK));
+        for (String name : config.lists.keySet()) {
+            CheckMenuItem item = new CheckMenuItem(name);
+            item.setSelected(keys.stream().allMatch(key -> RepoLists.contains(config.lists, name, key)));
+            item.setOnAction(event -> {
+                if (item.isSelected()) {
+                    RepoLists.add(config.lists, name, keys);
+                } else {
+                    RepoLists.remove(config.lists, name, keys);
+                }
+                listsChanged();
+            });
+            addTo.getItems().add(item);
+        }
+        if (!config.lists.isEmpty()) {
+            addTo.getItems().add(new SeparatorMenuItem());
+        }
+        MenuItem create = new MenuItem(t("lists.newFromSelection"), Icons.icon(Feather.PLUS));
+        create.setOnAction(event -> createList(keys));
+        addTo.getItems().add(create);
+        menu.getItems().add(addTo);
+        if (!config.shownList.isEmpty()) {
+            String shown = config.shownList;
+            MenuItem remove = new MenuItem(MessageFormat.format(t("lists.removeFrom"), shown), Icons.icon(Feather.X));
+            remove.setOnAction(event -> {
+                RepoLists.remove(config.lists, shown, keys);
+                listsChanged();
+            });
+            menu.getItems().add(remove);
+        }
+        menu.getItems().add(new SeparatorMenuItem());
+        MenuItem tick = new MenuItem(t("lists.tick"), Icons.icon(Feather.CHECK_SQUARE));
+        tick.setOnAction(event -> picked.forEach(row -> row.setSelected(true)));
+        MenuItem untick = new MenuItem(t("lists.untick"), Icons.icon(Feather.SQUARE));
+        untick.setOnAction(event -> picked.forEach(row -> row.setSelected(false)));
+        menu.getItems().addAll(tick, untick);
+    }
+
+    private void createList(List<String> keys) {
+        String name = askListName(t("lists.newTitle"), "", null);
+        if (name == null) {
+            return;
+        }
+        RepoLists.create(config.lists, name, keys);
+        setStatus(MessageFormat.format(t(keys.isEmpty() ? "lists.createdEmpty" : "lists.created"), name));
+        listsChanged();
+    }
+
+    private void renameList(String name) {
+        String renamed = askListName(t("lists.renameTitle"), name, name);
+        if (renamed == null || renamed.equals(name)) {
+            return;
+        }
+        RepoLists.rename(config.lists, name, renamed);
+        if (config.shownList.equals(name)) {
+            config.shownList = renamed;
+        }
+        listsChanged();
+    }
+
+    private void deleteList(String name) {
+        if (!confirm(MessageFormat.format(t("lists.deleteConfirm"), name))) {
+            return;
+        }
+        config.lists.remove(name);
+        if (config.shownList.equals(name)) {
+            config.shownList = "";
+        }
+        listsChanged();
+    }
+
+    private void listsChanged() {
+        saveConfig();
+        fillListBar();
+        applyFilter();
+        repoTable.refresh();
+    }
+
+    /** Null when cancelled. The name must not be empty or used by another list. */
+    private String askListName(String title, String initial, String except) {
+        TextField field = new TextField(initial);
+        field.setPromptText(t("lists.namePrompt"));
+        field.setPrefWidth(320);
+        Label problem = new Label();
+        problem.getStyleClass().add("muted");
+        VBox content = new VBox(8, field, problem);
+        content.setPadding(new Insets(14));
+        Dialog<ButtonType> dialog = new Dialog<>();
+        prepare(dialog, title);
+        dialog.setHeaderText(null);
+        dialog.setGraphic(Icons.icon(Feather.BOOKMARK, 28));
+        dialog.getDialogPane().setContent(content);
+        ButtonType save = new ButtonType(t("signIn.save"), ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(save, ButtonType.CANCEL);
+        Node saveNode = dialog.getDialogPane().lookupButton(save);
+        Runnable validate = () -> {
+            String name = RepoLists.clean(field.getText());
+            boolean taken = name != null && RepoLists.taken(config.lists, name, except);
+            problem.setText(taken ? t("lists.taken") : "");
+            saveNode.setDisable(name == null || taken);
+        };
+        field.textProperty().addListener((observable, before, after) -> validate.run());
+        validate.run();
+        Platform.runLater(() -> {
+            field.requestFocus();
+            field.selectAll();
+        });
+        Optional<ButtonType> answer = dialog.showAndWait();
+        return answer.isPresent() && answer.get() == save ? RepoLists.clean(field.getText()) : null;
     }
 
     /** Ticks or clears the rows currently shown (the search may hide some). */
@@ -1677,7 +2092,33 @@ public class MainApp extends Application {
 
     private void applyLanguage(Scene scene) {
         scene.setNodeOrientation(orientation());
-        stage.setTitle(t("app.title"));
+        stage.setTitle(windowTitle());
+    }
+
+    /** The program's name and the version that is running, for the window's title bar. */
+    private String windowTitle() {
+        String version = updater == null ? "" : updater.currentVersion().map(Object::toString).orElse("");
+        if (version.isEmpty()) {
+            version = BUILD_VERSION;
+        }
+        return version.isEmpty() ? t("app.title") : MessageFormat.format(t("app.titleVersion"), t("app.title"), version);
+    }
+
+    /** The version in pom.xml, written into app-version.properties when the program is built. */
+    private static final String BUILD_VERSION = readBuildVersion();
+
+    private static String readBuildVersion() {
+        try (InputStream in = MainApp.class.getResourceAsStream("/app-version.properties")) {
+            if (in == null) {
+                return "";
+            }
+            Properties properties = new Properties();
+            properties.load(in);
+            String value = properties.getProperty("version", "").trim();
+            return value.startsWith("${") ? "" : value;
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     private NodeOrientation orientation() {

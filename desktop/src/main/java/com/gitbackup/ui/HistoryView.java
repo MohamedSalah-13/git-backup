@@ -69,7 +69,7 @@ final class HistoryView {
 
     private static String kindKey(String kind) {
         return switch (kind == null ? "" : kind) {
-            case "scheduled", "tray", "command", "check", "scheduled-check" -> kind;
+            case "scheduled", "tray", "command", "watch", "check", "scheduled-check" -> kind;
             default -> "manual";
         };
     }
