@@ -1,54 +1,42 @@
+import com.hamza.icons.IconSet;
+
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.GradientPaint;
 import java.awt.Graphics2D;
-import java.awt.RenderingHints;
 import java.awt.geom.Path2D;
 import java.awt.geom.RoundRectangle2D;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
-import java.io.DataOutputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import javax.imageio.ImageIO;
 
 /**
  * Draws the application icon and writes it in the formats the build needs:
  * src/main/resources/icon-{16,32,48,256}.png (window and tray), packaging/app.ico (Windows
  * installer and .exe), packaging/app.png (Linux) and packaging/app.icns (macOS). The results are
- * committed; run this only to change the icon:
+ * committed; run this only to change the icon.
  *
- * <pre>java packaging\MakeIcon.java .</pre>
+ * <p>Only the drawing is here; the files are written by the app-icons library the programs share
+ * (github.com/MohamedSalah-13/app-icons), a test-scope dependency in pom.xml, so Maven has already
+ * downloaded its jar. From the desktop folder:
+ *
+ * <pre>java -cp "%USERPROFILE%\.m2\repository\com\github\MohamedSalah-13\app-icons\v0.1.0\app-icons-v0.1.0.jar" packaging\MakeIcon.java .</pre>
  */
 public class MakeIcon {
-    private static final int[] ICO_SIZES = {16, 24, 32, 48, 64, 256};
     private static final int[] PNG_SIZES = {16, 32, 48, 256};
-    /** The .icns entries that hold a PNG, with the size each one is drawn at. */
-    private static final String[] ICNS_TYPES = {"ic11", "ic12", "ic07", "ic08", "ic09", "ic10"};
-    private static final int[] ICNS_SIZES = {32, 64, 128, 256, 512, 1024};
 
     public static void main(String[] args) throws IOException {
         Path project = Path.of(args.length > 0 ? args[0] : ".").toAbsolutePath().normalize();
-        Path resources = project.resolve("src/main/resources");
-        for (int size : PNG_SIZES) {
-            ImageIO.write(draw(size), "png", resources.resolve("icon-" + size + ".png").toFile());
-        }
-        Files.write(project.resolve("packaging/app.ico"), ico());
-        Files.write(project.resolve("packaging/app.png"), png(draw(512)));
-        Files.write(project.resolve("packaging/app.icns"), icns());
+        IconSet.of(MakeIcon::draw)
+                .pngs("src/main/resources/icon-%d.png", PNG_SIZES)
+                .ico("packaging/app.ico")
+                .png("packaging/app.png", 512)
+                .icns("packaging/app.icns")
+                .write(project);
         System.out.println("Icon files written under " + project);
     }
 
-    /** A blue rounded square with a white arrow dropping into a tray. */
-    private static BufferedImage draw(int size) {
-        BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = image.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+    /** A blue rounded square with a white arrow dropping into a tray, in pixels of the size asked for. */
+    private static void draw(Graphics2D g, int size) {
         float s = size;
         g.setPaint(new GradientPaint(0, 0, new Color(0x2F81F7), 0, s, new Color(0x1557C0)));
         g.fill(new RoundRectangle2D.Float(0, 0, s, s, s * 0.44f, s * 0.44f));
@@ -72,72 +60,5 @@ public class MakeIcon {
         tray.lineTo(s * 0.78f, s * 0.80f);
         tray.lineTo(s * 0.78f, s * 0.62f);
         g.draw(tray);
-        g.dispose();
-        return image;
-    }
-
-    private static byte[] ico() throws IOException {
-        byte[][] images = new byte[ICO_SIZES.length][];
-        for (int i = 0; i < ICO_SIZES.length; i++) {
-            images[i] = ICO_SIZES[i] >= 256 ? png(draw(ICO_SIZES[i])) : dib(draw(ICO_SIZES[i]));
-        }
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        ByteBuffer header = ByteBuffer.allocate(6 + 16 * images.length).order(ByteOrder.LITTLE_ENDIAN);
-        header.putShort((short) 0).putShort((short) 1).putShort((short) images.length);
-        int offset = header.capacity();
-        for (int i = 0; i < images.length; i++) {
-            int size = ICO_SIZES[i];
-            header.put((byte) (size >= 256 ? 0 : size)).put((byte) (size >= 256 ? 0 : size));
-            header.put((byte) 0).put((byte) 0);
-            header.putShort((short) 1).putShort((short) 32);
-            header.putInt(images[i].length).putInt(offset);
-            offset += images[i].length;
-        }
-        bytes.write(header.array());
-        for (byte[] image : images) {
-            bytes.write(image);
-        }
-        return bytes.toByteArray();
-    }
-
-    /** Apple's icon file: a big-endian header, then each size as a PNG under its four-letter type. */
-    private static byte[] icns() throws IOException {
-        ByteArrayOutputStream entries = new ByteArrayOutputStream();
-        for (int i = 0; i < ICNS_TYPES.length; i++) {
-            byte[] image = png(draw(ICNS_SIZES[i]));
-            entries.write(ICNS_TYPES[i].getBytes(StandardCharsets.US_ASCII));
-            entries.write(ByteBuffer.allocate(4).putInt(8 + image.length).array());
-            entries.write(image);
-        }
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        bytes.write("icns".getBytes(StandardCharsets.US_ASCII));
-        bytes.write(ByteBuffer.allocate(4).putInt(8 + entries.size()).array());
-        entries.writeTo(bytes);
-        return bytes.toByteArray();
-    }
-
-    private static byte[] png(BufferedImage image) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        ImageIO.write(image, "png", out);
-        return out.toByteArray();
-    }
-
-    /** A 32-bit bitmap as .ico stores it: bottom-up BGRA rows followed by an (empty) 1-bit mask. */
-    private static byte[] dib(BufferedImage image) throws IOException {
-        int size = image.getWidth();
-        int maskRow = ((size + 31) / 32) * 4;
-        ByteBuffer buffer = ByteBuffer.allocate(40 + size * size * 4 + maskRow * size).order(ByteOrder.LITTLE_ENDIAN);
-        buffer.putInt(40).putInt(size).putInt(size * 2);
-        buffer.putShort((short) 1).putShort((short) 32);
-        buffer.putInt(0).putInt(size * size * 4).putInt(0).putInt(0).putInt(0).putInt(0);
-        for (int y = size - 1; y >= 0; y--) {
-            for (int x = 0; x < size; x++) {
-                int argb = image.getRGB(x, y);
-                buffer.put((byte) argb).put((byte) (argb >> 8)).put((byte) (argb >> 16)).put((byte) (argb >>> 24));
-            }
-        }
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        new DataOutputStream(out).write(buffer.array());
-        return out.toByteArray();
     }
 }

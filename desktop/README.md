@@ -45,7 +45,7 @@ java -jar target\git-backup-desktop.jar --check
 
 - يحتاج البناء إلى WiX Toolset 3.x. بدونه: `-Type app-image` ينتج مجلدًا يعمل مباشرة دون مثبّت.
 - المثبّت غير موقّع رقميًا، فسيعرض Windows تحذير "ناشر غير معروف" عند العميل إلى أن تُشترى شهادة توقيع.
-- لتغيير الأيقونة: عدّل `packaging\MakeIcon.java` ثم `java packaging\MakeIcon.java .`
+- لتغيير الأيقونة: عدّل الرسم في `packaging\MakeIcon.java` ثم شغّله بالأمر المكتوب في رأس الملف (كتابة الملفات في مكتبة [app-icons](https://github.com/MohamedSalah-13/app-icons) المشتركة)
 
 ### Linux و macOS
 
