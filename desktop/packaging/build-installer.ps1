@@ -63,6 +63,12 @@ function Invoke-Tool {
 }
 
 # --- 1. build
+# jpackage leaves its launcher and installer read-only, and from JDK 25 on Java no longer deletes a
+# read-only file on Windows: 'mvn clean' would stop at the installer of the previous build.
+if ($onWindows -and (Test-Path -LiteralPath $target)) {
+    Get-ChildItem -LiteralPath $target -Recurse -File -Force | Where-Object { $_.IsReadOnly } |
+        ForEach-Object { $_.IsReadOnly = $false }
+}
 $mvn = 'mvn'
 if ($onWindows) { $mvn = 'mvn.cmd' }
 $mvnArgs = @('-B', '-q', '-f', (Join-Path $project 'pom.xml'), 'clean', 'package')
