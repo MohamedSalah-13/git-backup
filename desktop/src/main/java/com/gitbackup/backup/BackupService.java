@@ -528,7 +528,7 @@ public final class BackupService {
     }
 
     /** Sends every line to the caller and appends it to this month's log file. */
-    private BackupLog withFileLog(BackupLog target) {
+    public BackupLog withFileLog(BackupLog target) {
         Path file = paths.logsDir().resolve("backup-" + LocalDateTime.now().format(LOG_MONTH) + ".log");
         return new BackupLog() {
             @Override
