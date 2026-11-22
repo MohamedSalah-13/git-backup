@@ -27,63 +27,16 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-
 jobs:
-  package:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  packages:
+    name: Packages
+    # The jobs are desktop-updater's shared ones: build-installer.ps1 on Linux and on both kinds of Mac.
+    # Pinned to a commit, so nothing changes here without a pull request in this repository.
+    uses: MohamedSalah-13/desktop-updater/.github/workflows/package-unix.yml@12790947000d45c2d097790c3af2607a56a9550a
     permissions:
       contents: write # adds the installers to the release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux (.deb)
-            os: ubuntu-latest
-          - name: macOS Apple Silicon (.dmg)
-            os: macos-latest
-          - name: macOS Intel (.dmg)
-            os: macos-15-intel
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '25'
-          cache: maven
-
-      - name: Install what jpackage needs for a .deb
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fakeroot
-
-      - name: Build the installer
-        shell: pwsh
-        run: ./desktop/packaging/build-installer.ps1
-
-      - name: Keep the installer with this run
-        uses: actions/upload-artifact@v7
-        with:
-          name: installer-${{ matrix.os }}
-          path: desktop/target/installer/GitBackup-*
-          if-no-files-found: error
-
-      - name: Upload test reports
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: surefire-reports-${{ matrix.os }}
-          path: desktop/target/surefire-reports
-          if-no-files-found: ignore
-
-      - name: Add the installer to the release
-        if: env.RELEASE_TAG != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" desktop/target/installer/GitBackup-* --clobber --repo "$GITHUB_REPOSITORY"
+    with:
+      script: desktop/packaging/build-installer.ps1
+      files: desktop/target/installer/GitBackup-*
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+      test-reports: desktop/target/surefire-reports
