@@ -414,14 +414,44 @@ public class MainApp extends Application {
         }
         watching = true;
         lastWatch = now;
-        watcher.submit(() -> {
+        watcher.execute(BackgroundTask.guarded(() -> {
             try {
                 BackupService.Listing listing = service.list();
                 Platform.runLater(() -> afterWatch(listing, null));
             } catch (Exception e) {
                 Platform.runLater(() -> afterWatch(null, e));
             }
-        });
+        }, error -> {
+            // Without this the watch would think it is still looking, and never look again.
+            reportUnexpected(error);
+            Platform.runLater(() -> watching = false);
+        }));
+    }
+
+    /**
+     * Runs {@code work} on the backup thread. Whatever it throws that it did not catch itself
+     * goes to the log and ends the busy state, so a failed run never leaves the window, and the
+     * schedule that waits for it, busy for good.
+     */
+    private void inBackground(Runnable work) {
+        worker.execute(BackgroundTask.guarded(work, error -> {
+            reportUnexpected(error);
+            Platform.runLater(() -> {
+                // A run that keeps failing the same way is not started again every 30 seconds.
+                autoRetryAfter = System.currentTimeMillis() + RETRY_DELAY_MS;
+                setBusy(false, false, t("state.unexpected"));
+            });
+        }));
+    }
+
+    /** Writes an error nothing else caught to the window and to this month's log file. */
+    private void reportUnexpected(Throwable error) {
+        BackupLog log = service.withFileLog((level, line) -> Platform.runLater(() -> appendLog(line)));
+        log.error("Unexpected error on " + Thread.currentThread().getName() + ": " + error);
+        StackTraceElement[] frames = error.getStackTrace();
+        for (int i = 0; i < Math.min(5, frames.length); i++) {
+            log.error("    at " + frames[i]);
+        }
     }
 
     private void afterWatch(BackupService.Listing listing, Exception error) {
@@ -1177,7 +1207,7 @@ public class MainApp extends Application {
             return;
         }
         setBusy(true, false, t("state.loading"));
-        worker.submit(() -> {
+        inBackground(() -> {
             try {
                 BackupService.Listing listing = DemoData.enabled() ? DemoData.listing() : service.list();
                 Platform.runLater(() -> showListing(listing));
@@ -1601,7 +1631,7 @@ public class MainApp extends Application {
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         setBusy(true, true, t("state.running"));
         BackupLog log = windowLog();
-        worker.submit(() -> {
+        inBackground(() -> {
             BackupService.Summary summary = service.run(force, kind, log, stopRequested::get);
             Platform.runLater(() -> {
                 if (scheduled) {
@@ -1649,7 +1679,7 @@ public class MainApp extends Application {
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
         setBusy(true, true, t("state.checking"));
         BackupLog log = windowLog();
-        worker.submit(() -> {
+        inBackground(() -> {
             BackupService.CheckSummary summary =
                     service.check(scheduled ? "scheduled-check" : "check", log, stopRequested::get);
             Platform.runLater(() -> {
@@ -1801,7 +1831,7 @@ public class MainApp extends Application {
     private void startRestore(BackupVersion version, Path parent, boolean full, char[] password) {
         BackupLog log = (level, line) -> Platform.runLater(() -> appendLog(line));
         setBusy(true, false, t("state.restoring"));
-        worker.submit(() -> {
+        inBackground(() -> {
             try {
                 if (full) {
                     restoreService.restoreRepository(version, parent, password, log);
