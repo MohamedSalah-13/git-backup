@@ -16,6 +16,10 @@
     On Windows the installer is per-user (no administrator rights), adds a Start menu entry and a
     desktop shortcut, and upgrades an older version in place.
 
+    The steps every program's script repeats come from desktop-updater's tools/Packaging.psm1, found
+    in a clone of desktop-updater beside this repository or where DESKTOP_UPDATER_HOME points, as
+    release.ps1 finds it. What is Git Backup's own stays here.
+
     Needs JDK 25+ (jpackage) and Maven. Step 3 also needs WiX Toolset 3.x on Windows, and
     fakeroot (deb) or rpm-build (rpm) on Linux. Runs in Windows PowerShell 5.1 and in PowerShell 7.
 
@@ -37,6 +41,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $target = Join-Path $project 'target'
+$pom = Join-Path $project 'pom.xml'
 $appName = 'Git Backup'
 # Identifies the product to Windows Installer so a new version replaces the old one. Never change it.
 $upgradeUuid = '6f1d2b0e-7c43-4f0a-9b1e-3a5c8d2e4f71'
@@ -45,48 +50,38 @@ $modules = 'java.base,java.datatransfer,java.desktop,java.logging,java.managemen
     'java.net.http,java.prefs,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.xml,' +
     'jdk.charsets,jdk.crypto.cryptoki,jdk.unsupported,jdk.zipfs'
 
-# $IsMacOS does not exist in Windows PowerShell 5.1, where it reads as empty.
-$onWindows = $env:OS -eq 'Windows_NT'
-$onMac = (-not $onWindows) -and $IsMacOS
-if ($onWindows) { $platform = 'windows' } elseif ($onMac) { $platform = 'macos' } else { $platform = 'linux' }
-$allowed = @{ windows = @('exe', 'msi'); linux = @('deb', 'rpm'); macos = @('dmg', 'pkg') }[$platform]
-if (-not $Type) { $Type = $allowed[0] }
-if ($Type -ne 'app-image' -and $allowed -notcontains $Type) {
-    throw "-Type $Type cannot be built on $platform. Here: $($allowed -join ', ') or app-image."
+# desktop-updater is looked for beside the repository, wherever in it this script sits.
+$updaterHome = $env:DESKTOP_UPDATER_HOME
+if (-not $updaterHome) {
+    $repository = & git -C $project rev-parse --show-toplevel 2>$null
+    if (-not $repository) { $repository = $project }
+    $updaterHome = Join-Path (Split-Path -Parent $repository) 'desktop-updater'
 }
-$icon = Join-Path $PSScriptRoot @{ windows = 'app.ico'; linux = 'app.png'; macos = 'app.icns' }[$platform]
+$packaging = Join-Path $updaterHome 'tools/Packaging.psm1'
+if (-not (Test-Path -LiteralPath $packaging)) {
+    throw "desktop-updater was not found at $updaterHome. Clone https://github.com/MohamedSalah-13/desktop-updater beside this repository, or set DESKTOP_UPDATER_HOME."
+}
+Import-Module $packaging -Force
 
-function Invoke-Tool {
-    param([string]$Exe, [string[]]$Arguments)
-    & $Exe @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE." }
-}
+$platform = Get-PackagingPlatform
+$Type = Resolve-PackageType -Type $Type -Platform $platform
+$icon = Join-Path $PSScriptRoot ('app.' + (Get-IconExtension -Platform $platform))
+$jpackage = (Find-JPackage -MinimumVersion 25).Path
 
 # --- 1. build
-# jpackage leaves its launcher and installer read-only, and from JDK 25 on Java no longer deletes a
-# read-only file on Windows: 'mvn clean' would stop at the installer of the previous build.
-if ($onWindows -and (Test-Path -LiteralPath $target)) {
-    Get-ChildItem -LiteralPath $target -Recurse -File -Force | Where-Object { $_.IsReadOnly } |
-        ForEach-Object { $_.IsReadOnly = $false }
-}
-$mvn = 'mvn'
-if ($onWindows) { $mvn = 'mvn.cmd' }
-$mvnArgs = @('-B', '-q', '-f', (Join-Path $project 'pom.xml'), 'clean', 'package')
+$mvnArgs = @('-B', '-q', 'clean', 'package')
 if ($SkipTests) { $mvnArgs += '-DskipTests' }
 Write-Host 'Building the application...'
-Invoke-Tool $mvn $mvnArgs
+Invoke-MavenBuild -Pom $pom -Arguments $mvnArgs
 
-[xml]$pom = Get-Content -LiteralPath (Join-Path $project 'pom.xml') -Raw
-$version = ($pom.project.version -replace '-SNAPSHOT$', '')
-# macOS refuses a version that starts with 0, so 0.x.y is packaged there as 1.x.y. The program
-# itself reads its real version from gitbackup.version (MainApp), which is what the updater compares.
-$packageVersion = $version
-if ($onMac -and $version -match '^0\.(.+)$') { $packageVersion = '1.' + $Matches[1] }
+# The program reads its real version from gitbackup.version (MainApp), which is what the updater
+# compares; on macOS the package version of 0.x.y is 1.x.y.
+$versions = Get-PomVersion -Pom $pom -Platform $platform
+$version = $versions.Version
+$packageVersion = $versions.PackageVersion
 
-$stage = Join-Path $target 'jpackage-input'
-New-Item -ItemType Directory -Path (Join-Path $stage 'lib') -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $target 'git-backup-desktop.jar') -Destination $stage
-Copy-Item -Path (Join-Path (Join-Path $target 'lib') '*') -Destination (Join-Path $stage 'lib')
+$stage = New-JPackageInput -Path (Join-Path $target 'jpackage-input') `
+    -Item (Join-Path $target 'git-backup-desktop.jar'), (Join-Path $target 'lib')
 
 # --- 2. runnable folder with its own Java runtime
 $dest = Join-Path $target 'installer'
@@ -106,22 +101,17 @@ $imageArgs = @(
     '--java-options', "-Dgitbackup.version=$version",
     '--dest', $dest
 )
-if ($onMac) {
+if ($platform -eq 'macos') {
     $imageArgs += @('--mac-package-identifier', 'com.gitbackup.desktop', '--mac-package-name', $appName)
 }
-Invoke-Tool 'jpackage' $imageArgs
+Invoke-Native -FilePath $jpackage -ArgumentList $imageArgs
 $image = Join-Path $dest $appName
-if ($onMac) { $image += '.app' }
+if ($platform -eq 'macos') { $image += '.app' }
 Write-Host "Application folder: $image"
 if ($Type -eq 'app-image') { return }
 
 # --- 3. installer
-if ($onWindows -and -not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
-    $wix = Get-ChildItem 'C:\Program Files (x86)' -Directory -Filter 'WiX Toolset v3*' -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $wix) { throw 'WiX Toolset 3.x was not found. Install it from https://wixtoolset.org or use -Type app-image.' }
-    $env:PATH = (Join-Path $wix.FullName 'bin') + ';' + $env:PATH
-}
+if ($platform -eq 'windows') { [void](Find-WiX) }
 Write-Host 'Creating the installer...'
 $installerArgs = @(
     '--type', $Type,
@@ -132,16 +122,9 @@ $installerArgs = @(
     '--icon', $icon,
     '--dest', $dest
 )
-if ($onWindows) {
-    $installerArgs += @(
-        '--win-per-user-install',
-        '--win-dir-chooser',
-        '--win-menu',
-        '--win-menu-group', $appName,
-        '--win-shortcut',
-        '--win-upgrade-uuid', $upgradeUuid
-    )
-} elseif (-not $onMac) {
+if ($platform -eq 'windows') {
+    $installerArgs += @(Get-WinInstallerArgument -PerUser -DirChooser -Menu -MenuGroup $appName -Shortcut -UpgradeUuid $upgradeUuid)
+} elseif ($platform -eq 'linux') {
     $installerArgs += @(
         '--linux-package-name', 'git-backup',
         '--linux-shortcut',
@@ -149,14 +132,12 @@ if ($onWindows) {
         '--linux-app-category', 'utils'
     )
 }
-Invoke-Tool 'jpackage' $installerArgs
+Invoke-Native -FilePath $jpackage -ArgumentList $installerArgs
 
 # The Windows installer is named by packaging\release.ps1 when it is published. The others get
 # their published name here: jpackage's own names differ per system and hide the real version on macOS.
-if (-not $onWindows) {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    Get-ChildItem -LiteralPath $dest -File | Where-Object { $_.Extension -eq ".$Type" } |
-        Rename-Item -NewName "GitBackup-$version-$platform-$arch.$Type"
+if ($platform -ne 'windows') {
+    [void](Rename-PlatformPackage -Directory $dest -Type $Type -Name 'GitBackup' -Version $version -Platform $platform)
 }
 Get-ChildItem -LiteralPath $dest -File | ForEach-Object {
     Write-Host ('Installer: {0} ({1:N1} MB)' -f $_.FullName, ($_.Length / 1MB))
