@@ -44,6 +44,7 @@ java -jar target\git-backup-desktop.jar --check
 التثبيت لكل مستخدم (بدون صلاحيات مدير)، مع اختصار في قائمة ابدأ وعلى سطح المكتب، والإصدار الأحدث يستبدل الأقدم.
 
 - يحتاج البناء إلى WiX Toolset 3.x. بدونه: `-Type app-image` ينتج مجلدًا يعمل مباشرة دون مثبّت.
+- يحتاج نسخة من [desktop-updater](https://github.com/MohamedSalah-13/desktop-updater) بجوار هذا المستودع (أو في المسار `DESKTOP_UPDATER_HOME`)، كما يحتاجها `release.ps1`: خطوات التحزيم المشتركة بين البرامج في `tools/Packaging.psm1` هناك، ويبقى هنا ما يخص Git Backup وحده.
 - المثبّت غير موقّع رقميًا، فسيعرض Windows تحذير "ناشر غير معروف" عند العميل إلى أن تُشترى شهادة توقيع.
 - لتغيير الأيقونة: عدّل الرسم في `packaging\MakeIcon.java` ثم شغّله بالأمر المكتوب في رأس الملف (كتابة الملفات في مكتبة [app-icons](https://github.com/MohamedSalah-13/app-icons) المشتركة)
 
